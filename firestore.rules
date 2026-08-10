@@ -1,0 +1,62 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Every tenant-owned document must carry a garageId string so the data
+    // can never be written untagged and then leak across workshops.
+    function hasGarageTag() {
+      return request.resource.data.garageId is string
+             && request.resource.data.garageId.size() > 0;
+    }
+
+    // A delete carries no request.resource, so allow it for signed-in callers.
+    function isTaggedWrite() {
+      return request.resource == null || hasGarageTag();
+    }
+
+    // Admin / owner profiles. Document id is the Firebase Auth uid.
+    match /admin/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Garage workspace (tenant) profile and anything nested under it.
+    match /garages/{garageId}/{document=**} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /jobCards/{jobId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+
+    match /cashItems/{cashId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+
+    match /inventoryItems/{inventoryId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+
+    match /memberships/{membershipId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+
+    match /customers/{customerId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+
+    match /serviceAlerts/{alertId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isTaggedWrite();
+    }
+  }
+}

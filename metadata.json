@@ -1,0 +1,6 @@
+{
+  "name": "Garage Guru",
+  "description": "Swiss-modern Swiss-quality automotive workshop digital workspace app, with bento-grid dashboard, invoice generator, service plans, cashbook, and Gemini AI Diagnostics Assistant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

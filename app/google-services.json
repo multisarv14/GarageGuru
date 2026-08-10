@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1085525087237",
+    "project_id": "multisarv-mobileapps",
+    "storage_bucket": "multisarv-mobileapps.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1085525087237:android:50c035bcffd8254459786c",
+        "android_client_info": {
+          "package_name": "com.multisarv.garageguru"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCjodhNA-w07k72T_tpyMZ8YT99veKOngg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

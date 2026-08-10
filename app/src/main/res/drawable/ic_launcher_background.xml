@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Deliberately transparent.
+
+     The chrome-ringed badge is drawn in the foreground layer instead, so the icon reads as
+     the same circle on every device. If this layer painted a full-bleed colour, the launcher
+     mask would supply the outline and the icon would show up as a rounded square on the many
+     phones (Samsung, OnePlus, …) that do not use a circular mask. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M0,0h108v108h-108z"
+        android:fillColor="#00000000" />
+</vector>
