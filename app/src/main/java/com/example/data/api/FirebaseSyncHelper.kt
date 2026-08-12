@@ -7,6 +7,7 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.TeamMemberEntity
 import com.google.android.gms.tasks.Task
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -33,6 +34,7 @@ object FirebaseSyncHelper {
     const val MEMBERSHIPS = "memberships"
     const val CUSTOMERS = "customers"
     const val SERVICE_ALERTS = "serviceAlerts"
+    const val TEAM_MEMBERS = "teamMembers"
 
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
@@ -112,6 +114,7 @@ object FirebaseSyncHelper {
     fun saveInventoryItem(item: InventoryItemEntity) = write(INVENTORY_ITEMS, item.id, hashMapOf(
         "id" to item.id,
         "name" to item.name,
+        "stockType" to item.stockType,
         "quantity" to item.quantity,
         "minStockAlert" to item.minStockAlert,
         "unitPrice" to item.unitPrice
@@ -165,6 +168,19 @@ object FirebaseSyncHelper {
 
     fun deleteServiceAlert(id: Int) = remove(SERVICE_ALERTS, id)
 
+    // --- Team Members ---
+    fun saveTeamMember(member: TeamMemberEntity) = write(TEAM_MEMBERS, member.id, hashMapOf(
+        "id" to member.id,
+        "name" to member.name,
+        "role" to member.role,
+        "phone" to member.phone,
+        "username" to member.username,
+        "password" to member.password,
+        "isOwner" to member.isOwner
+    ))
+
+    fun deleteTeamMember(id: Int) = remove(TEAM_MEMBERS, id)
+
     // ------------------------------------------------------------------
     // Cloud -> local
     // ------------------------------------------------------------------
@@ -176,15 +192,17 @@ object FirebaseSyncHelper {
         val inventoryItems: List<InventoryItemEntity> = emptyList(),
         val memberships: List<ServiceMembershipEntity> = emptyList(),
         val customers: List<CustomerProfileEntity> = emptyList(),
-        val serviceAlerts: List<ServiceAlertEntity> = emptyList()
+        val serviceAlerts: List<ServiceAlertEntity> = emptyList(),
+        val teamMembers: List<TeamMemberEntity> = emptyList()
     ) {
         val isEmpty: Boolean
             get() = jobCards.isEmpty() && cashItems.isEmpty() && inventoryItems.isEmpty() &&
-                memberships.isEmpty() && customers.isEmpty() && serviceAlerts.isEmpty()
+                memberships.isEmpty() && customers.isEmpty() && serviceAlerts.isEmpty() &&
+                teamMembers.isEmpty()
 
         val total: Int
             get() = jobCards.size + cashItems.size + inventoryItems.size +
-                memberships.size + customers.size + serviceAlerts.size
+                memberships.size + customers.size + serviceAlerts.size + teamMembers.size
     }
 
     private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { cont ->
@@ -255,6 +273,7 @@ object FirebaseSyncHelper {
             InventoryItemEntity(
                 id = it.int("id"),
                 name = it.str("name"),
+                stockType = it.str("stockType", "Spare"),
                 quantity = it.int("quantity"),
                 minStockAlert = it.int("minStockAlert", 3),
                 unitPrice = it.dbl("unitPrice")
@@ -304,7 +323,19 @@ object FirebaseSyncHelper {
             )
         }.filter { it.id > 0 }
 
-        return CloudSnapshot(jobs, cash, inventory, memberships, customers, alerts)
+        val team = fetch(TEAM_MEMBERS).map {
+            TeamMemberEntity(
+                id = it.int("id"),
+                name = it.str("name"),
+                role = it.str("role", "Technician"),
+                phone = it.str("phone"),
+                username = it.str("username"),
+                password = it.str("password"),
+                isOwner = (it["isOwner"] as? Boolean) ?: false
+            )
+        }.filter { it.id > 0 && it.name.isNotBlank() }
+
+        return CloudSnapshot(jobs, cash, inventory, memberships, customers, alerts, team)
     }
 
     /** Pushes the whole local database up — used right after a fresh sign up. */
@@ -316,6 +347,7 @@ object FirebaseSyncHelper {
         snapshot.memberships.forEach { saveMembership(it) }
         snapshot.customers.forEach { saveCustomerProfile(it) }
         snapshot.serviceAlerts.forEach { saveServiceAlert(it) }
+        snapshot.teamMembers.forEach { saveTeamMember(it) }
         Log.d(TAG, "Pushed ${snapshot.total} local records to garage ${GarageSession.garageId}")
     }
 }

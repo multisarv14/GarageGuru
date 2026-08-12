@@ -37,6 +37,7 @@ data class CashItemEntity(
 data class InventoryItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val name: String,
+    val stockType: String = "Spare", // Service, Spare, Lube
     val quantity: Int,
     val minStockAlert: Int,
     val unitPrice: Double
@@ -65,6 +66,17 @@ data class CustomerProfileEntity(
     val address: String = "",
     val notes: String = "",
     val creationTime: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "team_members")
+data class TeamMemberEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val role: String, // Owner, Manager, Service Advisor, Technician
+    val phone: String,
+    val username: String = "",
+    val password: String = "",
+    val isOwner: Boolean = false
 )
 
 @Entity(tableName = "service_alerts")

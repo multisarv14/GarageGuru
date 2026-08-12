@@ -7,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import coil.compose.AsyncImage
 import androidx.compose.ui.layout.ContentScale
-import com.example.ui.components.QrCodeScannerModal
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.animation.*
@@ -57,23 +56,18 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.TeamMemberEntity
 import com.example.ui.GarageViewModel
 import com.example.data.api.FirebaseAuthHelper
 import com.example.data.api.GarageLogoStore
 import com.example.data.api.GarageSession
 import kotlinx.coroutines.launch
 import com.example.ui.components.MechanicalGLogo
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.t
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
-
-data class TeamUserEntity(
-    val id: String,
-    val name: String,
-    val role: String, // "Owner", "Manager", "Service Advisor", "Technician"
-    val phone: String,
-    val pin: String = "1234"
-)
 
 /**
  * A workshop starts with exactly one team member: the owner who signed up. Extra mechanics are
@@ -82,14 +76,13 @@ data class TeamUserEntity(
 fun ownerTeamMember(
     name: String = GarageSession.ownerName,
     phone: String = GarageSession.ownerPhone
-) = TeamUserEntity(
-    id = OWNER_MEMBER_ID,
+) = TeamMemberEntity(
+    id = 0,
     name = name.ifBlank { "Owner" },
     role = "Owner",
-    phone = phone
+    phone = phone,
+    isOwner = true
 )
-
-const val OWNER_MEMBER_ID = "owner"
 
 object RolePermissions {
     fun canAccessFinancials(role: String): Boolean = role in listOf("Owner", "Manager")
@@ -129,7 +122,7 @@ fun MainAppScreen(
     // Auth, Garage & Team Role State
     // Firebase keeps the session across restarts, so a returning owner skips the login form.
     var isLoggedIn by remember { mutableStateOf(FirebaseAuthHelper.isSignedIn()) }
-    var teamMembersList by remember { mutableStateOf(listOf(ownerTeamMember())) }
+    val teamMembersList by viewModel.teamMembers.collectAsState()
     var currentActiveUser by remember { mutableStateOf(ownerTeamMember()) }
     var currentOwnerName by remember { mutableStateOf(GarageSession.ownerName.ifBlank { currentActiveUser.name }) }
     var currentGarageName by remember { mutableStateOf(GarageSession.garageName) }
@@ -140,7 +133,7 @@ fun MainAppScreen(
     var showTeamManagementSheet by remember { mutableStateOf(false) }
 
     // App Language State (en = English, hi = Hindi, mr = Marathi)
-    var selectedLanguage by remember { mutableStateOf("en") }
+    var selectedLanguage by remember { mutableStateOf(GarageSession.appLanguage) }
     var showLanguageDialog by remember { mutableStateOf(false) }
 
     val userInitials = remember(currentActiveUser.name) {
@@ -169,12 +162,11 @@ fun MainAppScreen(
     var showNotificationDialog by remember { mutableStateOf(false) }
     var showMoreBottomSheet by remember { mutableStateOf(false) }
     var showDiagnosticsChatSheet by remember { mutableStateOf(false) }
-    var showQrScannerSheet by remember { mutableStateOf(false) }
     var prefilledJobForCreation by remember { mutableStateOf<JobCardEntity?>(null) }
 
     // System Back-Button Registry
     androidx.activity.compose.BackHandler(
-        enabled = showCreateJobSheet || selectedOrderForInvoice != null || showNotificationDialog || showMoreBottomSheet || showDiagnosticsChatSheet || showQrScannerSheet || activeTab != "dashboard"
+        enabled = showCreateJobSheet || selectedOrderForInvoice != null || showNotificationDialog || showMoreBottomSheet || showDiagnosticsChatSheet || activeTab != "dashboard"
     ) {
         if (showCreateJobSheet) {
             showCreateJobSheet = false
@@ -187,8 +179,6 @@ fun MainAppScreen(
             showMoreBottomSheet = false
         } else if (showDiagnosticsChatSheet) {
             showDiagnosticsChatSheet = false
-        } else if (showQrScannerSheet) {
-            showQrScannerSheet = false
         } else if (activeTab != "dashboard") {
             currentTab = "dashboard"
         }
@@ -199,12 +189,12 @@ fun MainAppScreen(
         viewModel.startNetworkMonitoring(context)
     }
 
-    // The owner's real name/phone arrive from Firestore a moment after sign in; keep the
-    // owner row in the team list in step with them.
+    // The owner row itself is reconciled by the ViewModel after each cloud sync; here we only
+    // keep the on-screen active user label in step with the signed-in owner.
     LaunchedEffect(currentOwnerName, currentOwnerPhone) {
-        val owner = ownerTeamMember(currentOwnerName, currentOwnerPhone)
-        teamMembersList = listOf(owner) + teamMembersList.filter { it.id != OWNER_MEMBER_ID }
-        if (currentActiveUser.id == OWNER_MEMBER_ID) currentActiveUser = owner
+        if (currentActiveUser.isOwner) {
+            currentActiveUser = ownerTeamMember(currentOwnerName, currentOwnerPhone)
+        }
     }
 
     // Rehydrate an existing Firebase session and pull this workshop's cloud data down.
@@ -223,6 +213,7 @@ fun MainAppScreen(
     }
 
     if (!isLoggedIn) {
+        androidx.compose.runtime.CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
         GarageAuthScreen(
             selectedLanguage = selectedLanguage,
             onOpenLanguageDialog = { showLanguageDialog = true },
@@ -238,6 +229,7 @@ fun MainAppScreen(
                 currentLanguage = selectedLanguage,
                 onLanguageSelected = { lang ->
                     selectedLanguage = lang
+                    GarageSession.appLanguage = lang
                     showLanguageDialog = false
                     val msg = when(lang) {
                         "hi" -> "भाषा बदलकर हिंदी कर दी गई है"
@@ -249,9 +241,11 @@ fun MainAppScreen(
                 onDismiss = { showLanguageDialog = false }
             )
         }
+        }
         return
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalAppLanguage provides selectedLanguage) {
     Scaffold(
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -280,7 +274,8 @@ fun MainAppScreen(
                     onDismiss = { selectedOrderForInvoice = null },
                     onSavePdf = { job ->
                         viewModel.saveInvoicePdf(job, context)
-                    }
+                    },
+                    onPaidAndClosed = { currentTab = "jobs:Closed" }
                 )
             } else {
                 Column(
@@ -308,7 +303,7 @@ fun MainAppScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "OFFLINE - Swiss Diagnostic Hub is working locally",
+                                text = t("offline.banner"),
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
@@ -328,7 +323,6 @@ fun MainAppScreen(
                         selectedLanguage = selectedLanguage,
                         searchQuery = searchQuery,
                         onSearchChange = { searchQuery = it },
-                        onScanQrClick = { showQrScannerSheet = true },
                         currentTab = activeTab,
                         userInitials = userInitials,
                         pendingAlertCount = serviceAlertsList.count { it.status != "SERVICED" && it.status != "COMPLETED" }
@@ -346,7 +340,6 @@ fun MainAppScreen(
                                 customerProfiles = customerProfilesList,
                                 onTabNavigate = { currentTab = it },
                                 onCreateJobClick = { showCreateJobSheet = true },
-                                onOpenScanner = { showQrScannerSheet = true },
                                 currentActiveUser = currentActiveUser,
                                 onOpenTeamManagement = { showTeamManagementSheet = true }
                             )
@@ -366,7 +359,6 @@ fun MainAppScreen(
                                 customerProfiles = customerProfilesList,
                                 jobList = jobList,
                                 searchQuery = searchQuery,
-                                onOpenScanner = { showQrScannerSheet = true }
                             )
                             "reports" -> ReportsView(
                                 viewModel = viewModel,
@@ -386,7 +378,6 @@ fun MainAppScreen(
                                 fcmToken = fcmToken,
                                 searchQuery = searchQuery,
                                 onCreateJobClick = { showCreateJobSheet = true },
-                                onOpenScanner = { showQrScannerSheet = true }
                             )
                             "account" -> AccountSettingsView(
                                 onBackClick = { currentTab = "dashboard" },
@@ -433,7 +424,6 @@ fun MainAppScreen(
                         showCreateJobSheet = false
                         prefilledJobForCreation = null
                     },
-                    onScanQrClick = { showQrScannerSheet = true }
                 )
             }
 
@@ -470,36 +460,6 @@ fun MainAppScreen(
                 )
             }
 
-            // --- CameraX QR Code & VIN Scanner Sheet ---
-            if (showQrScannerSheet) {
-                QrCodeScannerModal(
-                    jobCards = jobList,
-                    inventoryItems = inventoryList,
-                    customerProfiles = customerProfilesList,
-                    memberships = membershipList,
-                    onDismiss = { showQrScannerSheet = false },
-                    onCreateJobWithPlate = { plate, customerName, phone ->
-                        showQrScannerSheet = false
-                        prefilledJobForCreation = JobCardEntity(
-                            vehiclePlate = plate,
-                            customerName = customerName,
-                            customerPhone = phone,
-                            vehicleName = "Scanned Vehicle ($plate)",
-                            symptoms = "VIN/Plate Scanned: $plate",
-                            status = "OPEN"
-                        )
-                        showCreateJobSheet = true
-                    },
-                    onSelectInventoryItem = { item ->
-                        showQrScannerSheet = false
-                        currentTab = "system"
-                    },
-                    onSelectCustomer = { cust ->
-                        showQrScannerSheet = false
-                        currentTab = "customers"
-                    }
-                )
-            }
 
             // --- Custom More Options Dialog ---
             if (showMoreBottomSheet) {
@@ -540,16 +500,14 @@ fun MainAppScreen(
                     teamMembers = teamMembersList,
                     activeUser = currentActiveUser,
                     onSelectActiveUser = { selectedUser ->
+                        // Only the active role changes here. currentOwnerName/Phone belong to the
+                        // signed-in garage owner and must not be overwritten by a staff pick.
                         currentActiveUser = selectedUser
-                        currentOwnerName = selectedUser.name
-                        currentOwnerPhone = selectedUser.phone
                     },
                     onAddTeamMember = { newMember ->
-                        teamMembersList = teamMembersList + newMember
+                        viewModel.addTeamMember(newMember)
                     },
-                    onRemoveTeamMember = { id ->
-                        teamMembersList = teamMembersList.filter { it.id != id }
-                    },
+                    onRemoveTeamMember = { id -> viewModel.deleteTeamMember(id) },
                     onDismiss = { showTeamManagementSheet = false }
                 )
             }
@@ -560,6 +518,7 @@ fun MainAppScreen(
                     currentLanguage = selectedLanguage,
                     onLanguageSelected = { lang ->
                         selectedLanguage = lang
+                        GarageSession.appLanguage = lang
                         showLanguageDialog = false
                         val msg = when(lang) {
                             "hi" -> "भाषा बदलकर हिंदी कर दी गई है"
@@ -572,6 +531,7 @@ fun MainAppScreen(
                 )
             }
         }
+    }
     }
 }
 
@@ -587,7 +547,6 @@ fun WorkshopTopBar(
     selectedLanguage: String = "en",
     searchQuery: String,
     onSearchChange: (String) -> Unit,
-    onScanQrClick: () -> Unit = {},
     currentTab: String = "dashboard",
     userInitials: String = "GG",
     userRole: String = "Owner",
@@ -709,20 +668,6 @@ fun WorkshopTopBar(
                         }
                     }
 
-                    // QR Scan Button
-                    IconButton(
-                        onClick = onScanQrClick,
-                        modifier = Modifier
-                            .size(34.dp)
-                            .testTag("qr_topbar_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.QrCodeScanner,
-                            contentDescription = "Scan VIN / QR",
-                            tint = Color(0xFF0284C7),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
 
                     // Notification Button with Badge
                     IconButton(
@@ -975,11 +920,7 @@ fun GarageBottomBar(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = when (selectedLanguage) {
-                        "hi" -> "स्टॉक"
-                        "mr" -> "साठा"
-                        else -> "Stock"
-                    },
+                    text = t("nav.stock"),
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (currentTab == "system") selectionColor else inactiveColor
@@ -1036,8 +977,7 @@ fun DashboardView(
     customerProfiles: List<CustomerProfileEntity> = emptyList(),
     onTabNavigate: (String) -> Unit,
     onCreateJobClick: () -> Unit,
-    onOpenScanner: () -> Unit = {},
-    currentActiveUser: TeamUserEntity = ownerTeamMember(),
+    currentActiveUser: TeamMemberEntity = ownerTeamMember(),
     onOpenTeamManagement: () -> Unit = {}
 ) {
     // Computations
@@ -1070,7 +1010,7 @@ fun DashboardView(
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Section 1: Bento Action Buttons (+ NEW JOB CARD, QUICK BILL, SCAN QR)
+        // Section 1: Bento Action Buttons (+ NEW JOB CARD, QUICK BILL)
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1080,7 +1020,7 @@ fun DashboardView(
                 Button(
                     onClick = onCreateJobClick,
                     modifier = Modifier
-                        .weight(1.1f)
+                        .weight(1f)
                         .height(38.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = DeepIndigo),
                     shape = RoundedCornerShape(12.dp),
@@ -1089,7 +1029,7 @@ fun DashboardView(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(imageVector = Icons.Default.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "NEW JOB", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                        Text(text = t("dash.newJob"), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
                     }
                 }
 
@@ -1107,26 +1047,10 @@ fun DashboardView(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(imageVector = Icons.Default.Bolt, contentDescription = null, tint = DeepIndigo, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "BILLING", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                        Text(text = t("dash.billing"), fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                     }
                 }
 
-                // Button 3: SCAN QR / VIN
-                Button(
-                    onClick = onOpenScanner,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 6.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(imageVector = Icons.Default.QrCodeScanner, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "SCAN QR", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
-                    }
-                }
             }
         }
 
@@ -1152,7 +1076,7 @@ fun DashboardView(
                     ) {
                         Text(text = "$openCount", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
                         Spacer(modifier = Modifier.height(1.dp))
-                        Text(text = "ACTIVE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
+                        Text(text = t("dash.active"), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
                     }
                 }
                 // Card 2: DONE (Green)
@@ -1171,7 +1095,7 @@ fun DashboardView(
                     ) {
                         Text(text = "$completedCount", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
                         Spacer(modifier = Modifier.height(1.dp))
-                        Text(text = "DONE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
+                        Text(text = t("dash.done"), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
                     }
                 }
                 // Card 3: CLOSED (Grey Slate)
@@ -1190,7 +1114,7 @@ fun DashboardView(
                     ) {
                         Text(text = "$closedCount", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color.White)
                         Spacer(modifier = Modifier.height(1.dp))
-                        Text(text = "CLOSED", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
+                        Text(text = t("dash.closed"), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White.copy(alpha = 0.85f))
                     }
                 }
             }
@@ -1208,28 +1132,28 @@ fun DashboardView(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.Inventory2,
                     iconColor = EmeraldGreen,
-                    title = "STOCK",
+                    title = t("dash.stock"),
                     onClick = { onTabNavigate("system") }
                 )
                 QuickActionIconCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.AccountBalanceWallet,
                     iconColor = Color.Red,
-                    title = "CASH",
+                    title = t("dash.cash"),
                     onClick = { onTabNavigate("cashbook") }
                 )
                 QuickActionIconCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.BarChart,
                     iconColor = DeepIndigo,
-                    title = "REPORTS",
+                    title = t("dash.reports"),
                     onClick = { onTabNavigate("reports") }
                 )
                 QuickActionIconCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.People,
                     iconColor = Color(0xFF2563EB),
-                    title = "CLIENTS",
+                    title = t("dash.clients"),
                     onClick = { onTabNavigate("customers") }
                 )
             }
@@ -1244,7 +1168,7 @@ fun DashboardView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "SERVICE PLANS & MEMBERSHIPS",
+                        text = t("dash.servicePlans"),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF1E293B),
@@ -1265,7 +1189,7 @@ fun DashboardView(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Plan",
+                            text = t("dash.plan"),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
@@ -1279,17 +1203,17 @@ fun DashboardView(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Default.Group,
                             iconColor = Color(0xFF8B5CF6),
-                            title = "ACTIVE SUBS",
+                            title = t("dash.activeSubs"),
                             value = "${membershipList.size}",
-                            subtitle = "TOTAL CUSTOMERS"
+                            subtitle = t("dash.totalCustomers")
                         )
                         SubscriptionStatCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Default.CalendarToday,
                             iconColor = Color(0xFFF59E0B),
-                            title = "EXPIRING SOON",
+                            title = t("dash.expiringSoon"),
                             value = "0",
-                            subtitle = "NEXT 3 DAYS"
+                            subtitle = t("dash.next3Days")
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1297,17 +1221,17 @@ fun DashboardView(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Default.AccessTime,
                             iconColor = Color(0xFF10B981),
-                            title = "TODAY'S LOAD",
+                            title = t("dash.todaysLoad"),
                             value = "$openCount",
-                            subtitle = "SCHEDULED"
+                            subtitle = t("dash.scheduled")
                         )
                         SubscriptionStatCard(
                             modifier = Modifier.weight(1f),
                             icon = Icons.Default.Payment,
                             iconColor = Color(0xFF3B82F6),
-                            title = "SUB REVENUE",
+                            title = t("dash.subRevenue"),
                             value = "₹${String.format("%.0f", totalIncome)}",
-                            subtitle = "THIS MONTH"
+                            subtitle = t("dash.thisMonth")
                         )
                     }
                 }
@@ -1329,7 +1253,7 @@ fun DashboardView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "TOTAL REVENUE",
+                            text = t("dash.totalRevenue"),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = DarkSlate
@@ -1363,7 +1287,7 @@ fun DashboardView(
                         Column {
                             if (!RolePermissions.canAccessFinancials(currentActiveUser.role)) {
                                 Text(
-                                    text = "🔒 Restricted to Manager / Owner",
+                                    text = "🔒 " + t("dash.restricted"),
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFF64748B)
@@ -1377,7 +1301,7 @@ fun DashboardView(
                                 )
                             }
                             Text(
-                                text = "COMBINED INCOME",
+                                text = t("dash.combinedIncome"),
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.Gray
@@ -1452,280 +1376,11 @@ fun DashboardView(
             }
         }
 
-        // Section 6.5: CUSTOMER DIRECTORY & VEHICLE HISTORY BENTO CARD
+        // Section 7: RECENT JOB CARDS — latest six, whatever their status
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color(0xFFE2E8F0))
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    // Header
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFFEEF2FF)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Group,
-                                    contentDescription = "Customers",
-                                    tint = DeepIndigo,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = "CLIENT DIRECTORY & VEHICLE HISTORY",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = DarkSlate,
-                                    letterSpacing = 0.5.sp
-                                )
-                                Text(
-                                    text = "${customerProfiles.size} Registered Clients • ${jobList.size} Total Visits",
-                                    fontSize = 10.sp,
-                                    color = Color.Gray
-                                )
-                            }
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Button(
-                                onClick = { showAddProfileDialogInDashboard = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = DeepIndigo),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(28.dp)
-                            ) {
-                                Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(12.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("+ Client", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Text(
-                                text = "ALL",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = DeepIndigo,
-                                modifier = Modifier.clickable { onTabNavigate("customers") }
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    if (customerProfiles.isEmpty()) {
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
-                            border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.Center
-                            ) {
-                                Icon(Icons.Default.DirectionsCar, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(28.dp))
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("No client contact details stored yet.", fontSize = 11.sp, color = CharcoalGray, fontWeight = FontWeight.Medium)
-                                Spacer(modifier = Modifier.height(6.dp))
-                                OutlinedButton(
-                                    onClick = { showAddProfileDialogInDashboard = true },
-                                    modifier = Modifier.height(30.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-                                ) {
-                                    Text("+ Add First Customer Profile", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                    } else {
-                        val recentClients = customerProfiles.take(3)
-                        val context = LocalContext.current
-
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            recentClients.forEach { profile ->
-                                val linkedJobs = remember(jobList, profile) {
-                                    jobList.filter {
-                                        it.customerName.equals(profile.name, ignoreCase = true) ||
-                                        it.customerPhone.contains(profile.phone) ||
-                                        it.vehiclePlate.equals(profile.vehiclePlate, ignoreCase = true)
-                                    }
-                                }
-                                var isExpandedHistory by remember { mutableStateOf(false) }
-
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
-                                    border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(34.dp)
-                                                        .clip(CircleShape)
-                                                        .background(DeepIndigo),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Text(
-                                                        text = profile.name.take(2).uppercase(),
-                                                        color = Color.White,
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 12.sp
-                                                    )
-                                                }
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                Column {
-                                                    Text(profile.name, fontWeight = FontWeight.Bold, fontSize = 12.sp, color = DarkSlate)
-                                                    Text("📞 ${profile.phone}", fontSize = 10.sp, color = Color.Gray)
-                                                }
-                                            }
-
-                                            Card(
-                                                colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
-                                                border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
-                                                shape = RoundedCornerShape(6.dp)
-                                            ) {
-                                                Text(
-                                                    text = profile.vehiclePlate.ifBlank { profile.vehicleName },
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFF1D4ED8),
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                )
-                                            }
-                                        }
-
-                                        Spacer(modifier = Modifier.height(6.dp))
-
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "🚗 ${profile.vehicleName} • ${linkedJobs.size} Service Visit(s)",
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = Color(0xFF475569)
-                                            )
-
-                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                IconButton(
-                                                    onClick = {
-                                                        val intent = android.content.Intent(android.content.Intent.ACTION_DIAL, android.net.Uri.parse("tel:${profile.phone}"))
-                                                        context.startActivity(intent)
-                                                    },
-                                                    modifier = Modifier.size(26.dp)
-                                                ) {
-                                                    Icon(Icons.Default.Phone, contentDescription = "Call", tint = Color(0xFF2563EB), modifier = Modifier.size(14.dp))
-                                                }
-
-                                                IconButton(
-                                                    onClick = {
-                                                        val text = "Hello ${profile.name}, greetings from garage workshop regarding your vehicle ${profile.vehicleName} (${profile.vehiclePlate})."
-                                                        val url = "whatsapp://send?phone=${profile.phone}&text=${UriCodec.encode(text)}"
-                                                        try {
-                                                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
-                                                            context.startActivity(intent)
-                                                        } catch (e: Exception) {
-                                                            Toast.makeText(context, "Link: $text", Toast.LENGTH_SHORT).show()
-                                                        }
-                                                    },
-                                                    modifier = Modifier.size(26.dp)
-                                                ) {
-                                                    Icon(Icons.Default.Chat, contentDescription = "WhatsApp", tint = Color(0xFF10B981), modifier = Modifier.size(14.dp))
-                                                }
-
-                                                IconButton(
-                                                    onClick = { isExpandedHistory = !isExpandedHistory },
-                                                    modifier = Modifier.size(26.dp)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = if (isExpandedHistory) Icons.Default.ExpandLess else Icons.Default.History,
-                                                        contentDescription = "History",
-                                                        tint = DeepIndigo,
-                                                        modifier = Modifier.size(14.dp)
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        // Collapsible Vehicle History
-                                        if (isExpandedHistory) {
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Divider(color = Color(0xFFE2E8F0))
-                                            Spacer(modifier = Modifier.height(6.dp))
-                                            Text("VEHICLE SERVICE HISTORY", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = DeepIndigo)
-                                            Spacer(modifier = Modifier.height(4.dp))
-
-                                            if (linkedJobs.isEmpty()) {
-                                                Text("No past job cards found for this vehicle.", fontSize = 10.sp, color = Color.Gray)
-                                            } else {
-                                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                    linkedJobs.forEach { job ->
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Column(modifier = Modifier.weight(1f)) {
-                                                                Text("Job #${job.id} • ${job.vehicleName}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = DarkSlate)
-                                                                Text(job.symptoms.ifBlank { job.tasks.ifBlank { "General Inspection" } }, fontSize = 9.sp, color = Color.Gray, maxLines = 1)
-                                                            }
-                                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                                Text("₹${String.format("%.0f", job.totalAmount)}", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
-                                                                Card(
-                                                                    colors = CardDefaults.cardColors(
-                                                                        containerColor = if (job.status == "OPEN") Color(0xFFEFF6FF) else Color(0xFFECFDF5)
-                                                                    )
-                                                                ) {
-                                                                    Text(
-                                                                        job.status,
-                                                                        fontSize = 8.sp,
-                                                                        fontWeight = FontWeight.Bold,
-                                                                        color = if (job.status == "OPEN") Color(0xFF2563EB) else Color(0xFF10B981),
-                                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                                                    )
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Section 7: RECENT ACTIVE JOB CARDS (Work log items)
-        item {
-            val activeJobs = jobList.filter { it.status == "OPEN" || it.status == "COMPLETED" }.take(5)
+            // jobList already arrives newest-first from the DAO, so this is simply the last six
+            // jobs the workshop touched, each carrying its own status chip.
+            val activeJobs = jobList.take(6)
             if (activeJobs.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -1734,14 +1389,14 @@ fun DashboardView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "RECENT ACTIVE JOBS",
+                            text = t("dash.recentJobs"),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = CharcoalGray,
                             letterSpacing = 1.sp
                         )
                         Text(
-                            text = "VIEW ALL",
+                            text = t("action.viewAll"),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = DeepIndigo,
@@ -2110,7 +1765,7 @@ fun AccountSettingsView(
             }
             Spacer(modifier = Modifier.width(12.dp))
             Text(
-                text = "Account & Settings",
+                text = t("set.title"),
                 fontSize = 18.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = Color(0xFF0F172A)
@@ -2137,7 +1792,7 @@ fun AccountSettingsView(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "GARAGE DETAILS & LOGO",
+                        text = t("set.garageDetails"),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF4F46E5)
@@ -2147,7 +1802,7 @@ fun AccountSettingsView(
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text(
-                            text = "VERIFIED WORKSHOP",
+                            text = t("set.verified"),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF059669),
@@ -2300,7 +1955,7 @@ fun AccountSettingsView(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = "Garage Owner & Admin",
+                        text = t("set.ownerAdmin"),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF059669),
@@ -2320,7 +1975,7 @@ fun AccountSettingsView(
                 ) {
                     Icon(Icons.Default.ExitToApp, contentDescription = "Log Out", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Log Out of Garage", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text(t("action.logout"), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 }
             }
         }
@@ -2393,7 +2048,7 @@ fun AccountSettingsView(
         }
 
         // Section 2: Workshop Modules
-        Text("WORKSHOP MODULES", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(start = 4.dp))
+        Text(t("set.modules"), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(start = 4.dp))
 
         // Admin Team & Mechanics Card
         Card(
@@ -2421,8 +2076,8 @@ fun AccountSettingsView(
                 }
                 Spacer(modifier = Modifier.width(14.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Garage Team & Mechanics", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF0F172A))
-                    Text("Manage Mechanics, Technicians & Roles", fontSize = 12.sp, color = Color(0xFF64748B))
+                    Text(t("set.team"), fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF0F172A))
+                    Text(t("set.teamSub"), fontSize = 12.sp, color = Color(0xFF64748B))
                 }
                 Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color(0xFF4F46E5))
             }
@@ -2450,7 +2105,7 @@ fun AccountSettingsView(
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     Icon(Icons.Default.Inventory2, contentDescription = null, tint = Color(0xFF0284C7), modifier = Modifier.size(24.dp))
-                    Text("Stock Inventory", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                    Text(t("set.stockModule"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
                 }
             }
 
@@ -2471,7 +2126,7 @@ fun AccountSettingsView(
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     Icon(Icons.Default.PeopleAlt, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(24.dp))
-                    Text("Clients & Wash", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                    Text(t("set.clientsModule"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
                 }
             }
         }
@@ -2497,7 +2152,7 @@ fun AccountSettingsView(
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(24.dp))
-                    Text("Ledger Book", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                    Text(t("set.ledgerModule"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
                 }
             }
 
@@ -2518,13 +2173,13 @@ fun AccountSettingsView(
                     verticalArrangement = Arrangement.SpaceBetween
                 ) {
                     Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(24.dp))
-                    Text("Service Alerts", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                    Text(t("set.alertsModule"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
                 }
             }
         }
 
         // Section 2: Preferences
-        Text("PREFERENCES & SYSTEM", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(start = 4.dp))
+        Text(t("set.system"), fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(start = 4.dp))
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -2536,45 +2191,13 @@ fun AccountSettingsView(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onOpenLanguageDialog() }
-                        .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Default.Language, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(20.dp))
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = when (selectedLanguage) {
-                            "hi" -> "ऐप की भाषा (Language)"
-                            "mr" -> "ॲपची भाषा (Language)"
-                            else -> "App Language"
-                        },
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        color = Color(0xFF0F172A),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = when (selectedLanguage) {
-                            "hi" -> "हिंदी"
-                            "mr" -> "मराठी"
-                            else -> "English"
-                        },
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF4F46E5)
-                    )
-                }
-                HorizontalDivider(color = Color(0xFFF1F5F9))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
                         .padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(Icons.Default.CloudDone, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text("Database Sync", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A), modifier = Modifier.weight(1f))
-                    Text("Online & Synced", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
+                    Text(t("set.dbSync"), fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A), modifier = Modifier.weight(1f))
+                    Text(t("set.online"), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFF10B981))
                 }
                 HorizontalDivider(color = Color(0xFFF1F5F9))
                 Row(
@@ -2585,7 +2208,7 @@ fun AccountSettingsView(
                 ) {
                     Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text("Garage Guru Version", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A), modifier = Modifier.weight(1f))
+                    Text(t("set.version"), fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A), modifier = Modifier.weight(1f))
                     Text("v3.2.0-clean", fontSize = 12.sp, color = Color(0xFF64748B))
                 }
             }
@@ -2673,7 +2296,7 @@ fun MoreOptionsDialog(
                                 shape = RoundedCornerShape(6.dp)
                             ) {
                                 Text(
-                                    text = "Garage Owner & Admin",
+                                    text = t("set.ownerAdmin"),
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFF059669),
@@ -2717,7 +2340,7 @@ fun MoreOptionsDialog(
                         }
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Garage Team & Mechanics", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                            Text(t("set.team"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF0F172A))
                             Text("Manage Mechanics & Staff", fontSize = 11.sp, color = Color(0xFF64748B))
                         }
                     }
@@ -2744,7 +2367,7 @@ fun MoreOptionsDialog(
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             Icon(Icons.Default.PeopleAlt, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(22.dp))
-                            Text("Clients & Wash", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
+                            Text(t("set.clientsModule"), fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
                         }
                     }
 
@@ -2765,7 +2388,7 @@ fun MoreOptionsDialog(
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             Icon(Icons.Default.AccountBalanceWallet, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(22.dp))
-                            Text("Ledger Book", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
+                            Text(t("set.ledgerModule"), fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
                         }
                     }
                 }
@@ -2791,7 +2414,7 @@ fun MoreOptionsDialog(
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             Icon(Icons.Default.Inventory2, contentDescription = null, tint = Color(0xFF0284C7), modifier = Modifier.size(22.dp))
-                            Text("Stock Inventory", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
+                            Text(t("set.stockModule"), fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
                         }
                     }
 
@@ -2812,7 +2435,7 @@ fun MoreOptionsDialog(
                             verticalArrangement = Arrangement.SpaceBetween
                         ) {
                             Icon(Icons.Default.NotificationsActive, contentDescription = null, tint = Color(0xFFF59E0B), modifier = Modifier.size(22.dp))
-                            Text("Service Alerts", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
+                            Text(t("set.alertsModule"), fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
                         }
                     }
                 }
@@ -2915,13 +2538,18 @@ fun GarageAuthScreen(
     // Login fields
     var loginPhone by remember { mutableStateOf("") }
     var loginPassword by remember { mutableStateOf("") }
+    var showLoginPassword by remember { mutableStateOf(false) }
 
     // Sign Up fields
     var signUpGarageName by remember { mutableStateOf("") }
     var signUpOwnerName by remember { mutableStateOf("") }
     var signUpPhone by remember { mutableStateOf("") }
-    var signUpPassword by remember { mutableStateOf("") }
+    var signUpEmail by remember { mutableStateOf("") }
     var signUpCity by remember { mutableStateOf("") }
+    var signUpPassword by remember { mutableStateOf("") }
+    var signUpConfirmPassword by remember { mutableStateOf("") }
+    var showSignUpPassword by remember { mutableStateOf(false) }
+    var isBusy by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
 
@@ -2938,7 +2566,6 @@ fun GarageAuthScreen(
             controller?.isAppearanceLightStatusBars = false
             onDispose { controller?.isAppearanceLightStatusBars = true }
         }
-        // Re-assert after every recomposition so the theme's global setting cannot win the frame.
         SideEffect {
             val window = (authView.context as? android.app.Activity)?.window
             window?.let {
@@ -2946,6 +2573,19 @@ fun GarageAuthScreen(
                     .isAppearanceLightStatusBars = false
             }
         }
+    }
+
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = Color(0xFF4F46E5),
+        focusedLabelColor = Color(0xFF4F46E5),
+        unfocusedBorderColor = Color(0xFFCBD5E1),
+        cursorColor = Color(0xFF4F46E5)
+    )
+    val fieldShape = RoundedCornerShape(10.dp)
+    val fieldText = androidx.compose.ui.text.TextStyle(fontSize = 13.sp)
+
+    fun label(en: String, hi: String, mr: String) = when (selectedLanguage) {
+        "hi" -> hi; "mr" -> mr; else -> en
     }
 
     Box(
@@ -2956,368 +2596,368 @@ fun GarageAuthScreen(
                     colors = listOf(Color(0xFF0F172A), Color(0xFF1E1B4B), Color(0xFF312E81))
                 )
             )
-            .padding(20.dp),
-        contentAlignment = Alignment.Center
     ) {
-        Card(
+        // The whole card scrolls, and imePadding keeps the focused field above the keyboard —
+        // without this the sign-up form could not be scrolled once the keyboard opened.
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState()),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .imePadding()
+                .windowInsetsPadding(WindowInsets.systemBars)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 12.dp)
             ) {
-                // Top Row: Logo & Language Selector Pill
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        MechanicalGLogo(modifier = Modifier.size(32.dp))
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            "Garage Guru",
-                            fontWeight = FontWeight.Black,
-                            fontSize = 22.sp,
-                            color = Color(0xFF0F172A)
-                        )
-                    }
-
-                    Surface(
-                        onClick = onOpenLanguageDialog,
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFFEEF2FF),
-                        border = BorderStroke(1.dp, Color(0xFFC7D2FE))
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Translate, contentDescription = "Language", tint = Color(0xFF4F46E5), modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = when(selectedLanguage) {
-                                    "hi" -> "हिंदी"
-                                    "mr" -> "मराठी"
-                                    else -> "English"
-                                },
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF4F46E5)
-                            )
-                        }
-                    }
-                }
-
-                Text(
-                    text = if (isSignUpTab) {
-                        when (selectedLanguage) {
-                            "hi" -> "अपने गैराज अकाउंट का पंजीकरण करें"
-                            "mr" -> "तुमच्या गॅरेज खात्याची नोंदणी करा"
-                            else -> "Register Your Garage Account"
-                        }
-                    } else {
-                        when (selectedLanguage) {
-                            "hi" -> "स्वागत है! गैराज में लॉगिन करें"
-                            "mr" -> "पुन्हा स्वागत आहे! गॅरेजमध्ये लॉगिन करा"
-                            else -> "Welcome Back! Login to Garage"
-                        }
-                    },
-                    fontSize = 13.sp,
-                    color = Color(0xFF64748B),
-                    fontWeight = FontWeight.Medium
-                )
-
-                // Tab Switcher (Login vs Sign Up)
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFFF1F5F9))
-                        .padding(4.dp)
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (!isSignUpTab) Color(0xFF4F46E5) else Color.Transparent)
-                            .clickable { isSignUpTab = false }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = when (selectedLanguage) {
-                                "hi" -> "मोबाइल लॉगिन"
-                                "mr" -> "मोबाईल लॉगिन"
-                                else -> "Mobile Login"
-                            },
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = if (!isSignUpTab) Color.White else Color(0xFF64748B)
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isSignUpTab) Color(0xFF4F46E5) else Color.Transparent)
-                            .clickable { isSignUpTab = true }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = when (selectedLanguage) {
-                                "hi" -> "गैराज साइन अप"
-                                "mr" -> "गॅरेज साइन अप"
-                                else -> "Garage Sign Up"
-                            },
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = if (isSignUpTab) Color.White else Color(0xFF64748B)
-                        )
-                    }
-                }
-
-                if (!isSignUpTab) {
-                    // Mobile Login Form
-                    OutlinedTextField(
-                        value = loginPhone,
-                        onValueChange = { loginPhone = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "मोबाइल नंबर"
-                                "mr" -> "मोबाईल नंबर"
-                                else -> "Mobile Number"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
-                    OutlinedTextField(
-                        value = loginPassword,
-                        onValueChange = { loginPassword = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "पासवर्ड"
-                                "mr" -> "पासवर्ड"
-                                else -> "Password"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
+                    // Brand row + language pill
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        TextButton(
-                            onClick = {
-                                FirebaseAuthHelper.sendPasswordReset(loginPhone) { _, message ->
-                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                                }
-                            },
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            MechanicalGLogo(modifier = Modifier.size(28.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = when (selectedLanguage) {
-                                    "hi" -> "पासवर्ड भूल गए?"
-                                    "mr" -> "पासवर्ड विसरलात?"
-                                    else -> "Forgot Password?"
-                                },
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF4F46E5)
+                                "Garage Guru",
+                                fontWeight = FontWeight.Black,
+                                fontSize = 19.sp,
+                                color = Color(0xFF0F172A)
                             )
+                        }
+                        Surface(
+                            onClick = onOpenLanguageDialog,
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFEEF2FF),
+                            border = BorderStroke(1.dp, Color(0xFFC7D2FE))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Translate,
+                                    contentDescription = "Language",
+                                    tint = Color(0xFF4F46E5),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = label("English", "हिंदी", "मराठी"),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4F46E5)
+                                )
+                            }
                         }
                     }
 
-                    Button(
-                        onClick = {
-                            if (loginPhone.isBlank() || loginPassword.isBlank()) {
-                                val msg = when (selectedLanguage) {
-                                    "hi" -> "कृपया मोबाइल नंबर और पासवर्ड दर्ज करें"
-                                    "mr" -> "कृपया मोबाईल नंबर आणि पासवर्ड टाका"
-                                    else -> "Please enter mobile number and password"
-                                }
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                            } else {
-                                FirebaseAuthHelper.signIn(loginPhone, loginPassword) { success, owner, garage, message ->
-                                    if (success) {
-                                        val msg = when (selectedLanguage) {
-                                            "hi" -> "लॉगिन सफल रहा!"
-                                            "mr" -> "लॉगिन यशस्वी झाले!"
-                                            else -> "Logged in successfully!"
-                                        }
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        onLoginSuccess(owner ?: "Owner", garage ?: "Garage Guru", loginPhone)
-                                    } else {
-                                        val err = message ?: "Login failed"
-                                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                                    }
-                                }
-                            }
-                        },
+                    Text(
+                        text = if (isSignUpTab)
+                            label("Register Your Garage Account", "अपने गैराज अकाउंट का पंजीकरण करें", "तुमच्या गॅरेज खात्याची नोंदणी करा")
+                        else
+                            label("Welcome Back! Sign in to Garage", "स्वागत है! गैराज में साइन इन करें", "पुन्हा स्वागत आहे! गॅरेजमध्ये साइन इन करा"),
+                        fontSize = 12.sp,
+                        color = Color(0xFF64748B),
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    // Tab switcher
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5))
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFFF1F5F9))
+                            .padding(3.dp)
                     ) {
-                        Icon(Icons.Default.Login, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = when (selectedLanguage) {
-                                "hi" -> "साइन इन करें"
-                                "mr" -> "साइन इन करा"
-                                else -> "SIGN IN"
-                            },
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
+                        listOf(false, true).forEach { signUp ->
+                            val active = isSignUpTab == signUp
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(if (active) Color(0xFF4F46E5) else Color.Transparent)
+                                    .clickable { isSignUpTab = signUp }
+                                    .padding(vertical = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (signUp)
+                                        label("Garage Sign Up", "गैराज साइन अप", "गॅरेज साइन अप")
+                                    else
+                                        label("Mobile Login", "मोबाइल लॉगिन", "मोबाईल लॉगिन"),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = if (active) Color.White else Color(0xFF64748B)
+                                )
+                            }
+                        }
                     }
-                } else {
-                    // Garage Sign Up Form
-                    OutlinedTextField(
-                        value = signUpGarageName,
-                        onValueChange = { signUpGarageName = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "गैराज / वर्कशॉप का नाम"
-                                "mr" -> "गॅरेज / वर्कशॉपचे नाव"
-                                else -> "Garage / Workshop Name"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Store, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
 
-                    OutlinedTextField(
-                        value = signUpOwnerName,
-                        onValueChange = { signUpOwnerName = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "मालिक / एडमिन का नाम"
-                                "mr" -> "मालक / ॲडमिनचे नाव"
-                                else -> "Owner / Admin Name"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
+                    if (!isSignUpTab) {
+                        OutlinedTextField(
+                            value = loginPhone,
+                            onValueChange = { loginPhone = it },
+                            label = { Text(label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
 
-                    OutlinedTextField(
-                        value = signUpPhone,
-                        onValueChange = { signUpPhone = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "मोबाइल नंबर"
-                                "mr" -> "मोबाईल नंबर"
-                                else -> "Mobile Number"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
-                    OutlinedTextField(
-                        value = signUpCity,
-                        onValueChange = { signUpCity = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "शहर / पता"
-                                "mr" -> "शहर / पत्ता"
-                                else -> "City / Location"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
-                    OutlinedTextField(
-                        value = signUpPassword,
-                        onValueChange = { signUpPassword = it },
-                        label = {
-                            Text(when (selectedLanguage) {
-                                "hi" -> "पासवर्ड बनाएं"
-                                "mr" -> "पासवर्ड तयार करा"
-                                else -> "Create Password"
-                            })
-                        },
-                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5)) },
-                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-
-                    Button(
-                        onClick = {
-                            if (signUpGarageName.isBlank() || signUpOwnerName.isBlank() || signUpPhone.isBlank() || signUpPassword.isBlank()) {
-                                val msg = when (selectedLanguage) {
-                                    "hi" -> "कृपया गैराज बनाने के लिए सभी जानकारी भरें"
-                                    "mr" -> "कृपया गॅरेज तयार करण्यासाठी सर्व माहिती भरा"
-                                    else -> "Please fill all details to create garage"
+                        OutlinedTextField(
+                            value = loginPassword,
+                            onValueChange = { loginPassword = it },
+                            label = { Text(label("Password", "पासवर्ड", "पासवर्ड"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            trailingIcon = {
+                                IconButton(onClick = { showLoginPassword = !showLoginPassword }) {
+                                    Icon(
+                                        imageVector = if (showLoginPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (showLoginPassword) "Hide password" else "Show password",
+                                        tint = Color(0xFF64748B),
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                            } else {
-                                FirebaseAuthHelper.signUp(signUpGarageName, signUpOwnerName, signUpPhone, signUpPassword, signUpCity) { success, message ->
-                                    if (success) {
-                                        val msg = when (selectedLanguage) {
-                                            "hi" -> "गैराज खाता पंजीकृत हो गया!"
-                                            "mr" -> "गॅरेज खाते नोंदणीकृत झाले!"
-                                            else -> "Garage Account Registered!"
+                            },
+                            visualTransformation = if (showLoginPassword)
+                                androidx.compose.ui.text.input.VisualTransformation.None
+                            else
+                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(
+                                onClick = {
+                                    FirebaseAuthHelper.sendPasswordReset(loginPhone) { _, message ->
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                            ) {
+                                Text(
+                                    label("Forgot Password?", "पासवर्ड भूल गए?", "पासवर्ड विसरलात?"),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF4F46E5)
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                if (loginPhone.isBlank() || loginPassword.isBlank()) {
+                                    Toast.makeText(
+                                        context,
+                                        label("Please enter mobile number and password", "कृपया मोबाइल नंबर और पासवर्ड दर्ज करें", "कृपया मोबाईल नंबर आणि पासवर्ड टाका"),
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    isBusy = true
+                                    FirebaseAuthHelper.signIn(loginPhone, loginPassword) { success, owner, garage, message ->
+                                        isBusy = false
+                                        if (success) {
+                                            Toast.makeText(context, label("Signed in successfully!", "साइन इन सफल रहा!", "साइन इन यशस्वी झाले!"), Toast.LENGTH_SHORT).show()
+                                            onLoginSuccess(owner ?: "Owner", garage ?: "Garage Guru", loginPhone)
+                                        } else {
+                                            Toast.makeText(context, message ?: "Sign in failed", Toast.LENGTH_LONG).show()
                                         }
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        onLoginSuccess(signUpOwnerName, signUpGarageName, signUpPhone)
-                                    } else {
-                                        val err = message ?: "Sign up failed"
-                                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
                                     }
                                 }
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
-                    ) {
-                        Icon(Icons.Default.AppRegistration, contentDescription = null)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = when (selectedLanguage) {
-                                "hi" -> "रजिस्टर करें और शुरू करें"
-                                "mr" -> "नोंदणी करा आणि सुरू करा"
-                                else -> "REGISTER & START"
                             },
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
+                            enabled = !isBusy,
+                            modifier = Modifier.fillMaxWidth().height(46.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5))
+                        ) {
+                            Icon(Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(label("SIGN IN", "साइन इन करें", "साइन इन करा"), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = signUpGarageName,
+                            onValueChange = { signUpGarageName = it },
+                            label = { Text(label("Garage / Workshop Name", "गैराज / वर्कशॉप का नाम", "गॅरेज / वर्कशॉपचे नाव"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Store, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
                         )
+
+                        OutlinedTextField(
+                            value = signUpOwnerName,
+                            onValueChange = { signUpOwnerName = it },
+                            label = { Text(label("Owner / Admin Name", "मालिक / एडमिन का नाम", "मालक / ॲडमिनचे नाव"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = signUpPhone,
+                                onValueChange = { signUpPhone = it },
+                                label = { Text(label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"), fontSize = 12.sp) },
+                                leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                                modifier = Modifier.weight(1.3f),
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                colors = fieldColors,
+                                textStyle = fieldText,
+                                shape = fieldShape
+                            )
+                            OutlinedTextField(
+                                value = signUpCity,
+                                onValueChange = { signUpCity = it },
+                                label = { Text(label("City", "शहर", "शहर"), fontSize = 12.sp) },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true,
+                                colors = fieldColors,
+                                textStyle = fieldText,
+                                shape = fieldShape
+                            )
+                        }
+
+                        // A real address is what makes password recovery possible at all — the
+                        // phone identity maps to a synthetic domain that can never receive mail.
+                        OutlinedTextField(
+                            value = signUpEmail,
+                            onValueChange = { signUpEmail = it },
+                            label = { Text(label("Email ID", "ईमेल आईडी", "ईमेल आयडी"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Email, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
+
+                        OutlinedTextField(
+                            value = signUpPassword,
+                            onValueChange = { signUpPassword = it },
+                            label = { Text(label("Create Password", "पासवर्ड बनाएं", "पासवर्ड तयार करा"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            trailingIcon = {
+                                IconButton(onClick = { showSignUpPassword = !showSignUpPassword }) {
+                                    Icon(
+                                        imageVector = if (showSignUpPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                        contentDescription = if (showSignUpPassword) "Hide password" else "Show password",
+                                        tint = Color(0xFF64748B),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            },
+                            visualTransformation = if (showSignUpPassword)
+                                androidx.compose.ui.text.input.VisualTransformation.None
+                            else
+                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
+
+                        val mismatch = signUpConfirmPassword.isNotEmpty() && signUpConfirmPassword != signUpPassword
+                        OutlinedTextField(
+                            value = signUpConfirmPassword,
+                            onValueChange = { signUpConfirmPassword = it },
+                            label = { Text(label("Confirm Password", "पासवर्ड की पुष्टि करें", "पासवर्डची खात्री करा"), fontSize = 12.sp) },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                            visualTransformation = if (showSignUpPassword)
+                                androidx.compose.ui.text.input.VisualTransformation.None
+                            else
+                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                            isError = mismatch,
+                            supportingText = if (mismatch) {
+                                { Text(label("Passwords do not match", "पासवर्ड मेल नहीं खाते", "पासवर्ड जुळत नाहीत"), fontSize = 11.sp, color = Color(0xFFEF4444)) }
+                            } else null,
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            colors = fieldColors,
+                            textStyle = fieldText,
+                            shape = fieldShape
+                        )
+
+                        Button(
+                            onClick = {
+                                val emailOk = signUpEmail.isBlank() ||
+                                    android.util.Patterns.EMAIL_ADDRESS.matcher(signUpEmail.trim()).matches()
+                                when {
+                                    signUpGarageName.isBlank() || signUpOwnerName.isBlank() ||
+                                        signUpPhone.isBlank() || signUpPassword.isBlank() ->
+                                        Toast.makeText(context, label("Please fill all details to create garage", "कृपया गैराज बनाने के लिए सभी जानकारी भरें", "कृपया गॅरेज तयार करण्यासाठी सर्व माहिती भरा"), Toast.LENGTH_SHORT).show()
+
+                                    !emailOk ->
+                                        Toast.makeText(context, label("Please enter a valid email id", "कृपया वैध ईमेल दर्ज करें", "कृपया वैध ईमेल टाका"), Toast.LENGTH_SHORT).show()
+
+                                    signUpPassword.length < 6 ->
+                                        Toast.makeText(context, label("Password must be at least 6 characters", "पासवर्ड कम से कम 6 अक्षर का हो", "पासवर्ड किमान 6 अक्षरांचा हवा"), Toast.LENGTH_SHORT).show()
+
+                                    signUpPassword != signUpConfirmPassword ->
+                                        Toast.makeText(context, label("Passwords do not match", "पासवर्ड मेल नहीं खाते", "पासवर्ड जुळत नाहीत"), Toast.LENGTH_SHORT).show()
+
+                                    else -> {
+                                        isBusy = true
+                                        FirebaseAuthHelper.signUp(
+                                            garageName = signUpGarageName,
+                                            ownerName = signUpOwnerName,
+                                            phone = signUpPhone,
+                                            password = signUpPassword,
+                                            city = signUpCity,
+                                            contactEmail = signUpEmail.trim()
+                                        ) { success, message ->
+                                            isBusy = false
+                                            if (success) {
+                                                Toast.makeText(context, label("Garage Account Registered!", "गैराज खाता पंजीकृत हो गया!", "गॅरेज खाते नोंदणीकृत झाले!"), Toast.LENGTH_SHORT).show()
+                                                onLoginSuccess(signUpOwnerName, signUpGarageName, signUpPhone)
+                                            } else {
+                                                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.fillMaxWidth().height(46.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                        ) {
+                            Icon(Icons.Default.AppRegistration, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(label("REGISTER & START", "रजिस्टर करें और शुरू करें", "नोंदणी करा आणि सुरू करा"), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
                     }
                 }
             }
@@ -3328,11 +2968,11 @@ fun GarageAuthScreen(
 // --- Admin Team & Role Management Dialog ---
 @Composable
 fun GarageTeamManagementSheet(
-    teamMembers: List<TeamUserEntity>,
-    activeUser: TeamUserEntity,
-    onSelectActiveUser: (TeamUserEntity) -> Unit,
-    onAddTeamMember: (TeamUserEntity) -> Unit,
-    onRemoveTeamMember: (String) -> Unit,
+    teamMembers: List<TeamMemberEntity>,
+    activeUser: TeamMemberEntity,
+    onSelectActiveUser: (TeamMemberEntity) -> Unit,
+    onAddTeamMember: (TeamMemberEntity) -> Unit,
+    onRemoveTeamMember: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -3342,7 +2982,9 @@ fun GarageTeamManagementSheet(
     var newMemberName by remember { mutableStateOf("") }
     var newMemberRole by remember { mutableStateOf("Technician") }
     var newMemberPhone by remember { mutableStateOf("") }
-    var newMemberPin by remember { mutableStateOf("1234") }
+    var newMemberUsername by remember { mutableStateOf("") }
+    var newMemberPassword by remember { mutableStateOf("") }
+    var showMemberPassword by remember { mutableStateOf(false) }
 
     val roleOptions = listOf("Owner", "Manager", "Service Advisor", "Technician")
 
@@ -3529,6 +3171,50 @@ fun GarageTeamManagementSheet(
                         shape = RoundedCornerShape(10.dp)
                     )
 
+                    // Credentials this member will use to sign in to the garage app.
+                    Text(
+                        "LOGIN CREDENTIALS",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF94A3B8),
+                        letterSpacing = 0.5.sp
+                    )
+
+                    OutlinedTextField(
+                        value = newMemberUsername,
+                        onValueChange = { newMemberUsername = it },
+                        label = { Text(t("team.username")) },
+                        placeholder = { Text("e.g. rahul.tech") },
+                        leadingIcon = { Icon(Icons.Default.AccountCircle, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    OutlinedTextField(
+                        value = newMemberPassword,
+                        onValueChange = { newMemberPassword = it },
+                        label = { Text(t("team.password")) },
+                        leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                        trailingIcon = {
+                            IconButton(onClick = { showMemberPassword = !showMemberPassword }) {
+                                Icon(
+                                    imageVector = if (showMemberPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = null,
+                                    tint = Color(0xFF64748B),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        },
+                        visualTransformation = if (showMemberPassword)
+                            androidx.compose.ui.text.input.VisualTransformation.None
+                        else
+                            androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End
@@ -3539,24 +3225,33 @@ fun GarageTeamManagementSheet(
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
                             onClick = {
-                                if (newMemberName.isNotBlank() && newMemberPhone.isNotBlank()) {
-                                    val newMember = TeamUserEntity(
-                                        id = "tm_${System.currentTimeMillis()}",
-                                        name = newMemberName,
-                                        role = newMemberRole,
-                                        phone = newMemberPhone,
-                                        pin = newMemberPin
-                                    )
-                                    onAddTeamMember(newMember)
-                                    Toast.makeText(context, "Added ${newMemberName} (${newMemberRole})!", Toast.LENGTH_SHORT).show()
-                                    showAddMemberDialog = false
-                                    newMemberName = ""
-                                    newMemberPhone = ""
+                                when {
+                                    newMemberName.isBlank() || newMemberPhone.isBlank() ->
+                                        Toast.makeText(context, "Enter name and phone number", Toast.LENGTH_SHORT).show()
+                                    newMemberUsername.isBlank() || newMemberPassword.isBlank() ->
+                                        Toast.makeText(context, "Enter a username and password for this member's login", Toast.LENGTH_SHORT).show()
+                                    teamMembers.any { it.username.equals(newMemberUsername.trim(), ignoreCase = true) } ->
+                                        Toast.makeText(context, "That username is already taken", Toast.LENGTH_SHORT).show()
+                                    else -> {
+                                        onAddTeamMember(
+                                            TeamMemberEntity(
+                                                name = newMemberName.trim(),
+                                                role = newMemberRole,
+                                                phone = newMemberPhone.trim(),
+                                                username = newMemberUsername.trim(),
+                                                password = newMemberPassword
+                                            )
+                                        )
+                                        Toast.makeText(context, "Added $newMemberName ($newMemberRole)!", Toast.LENGTH_SHORT).show()
+                                        showAddMemberDialog = false
+                                        newMemberName = ""; newMemberPhone = ""
+                                        newMemberUsername = ""; newMemberPassword = ""
+                                    }
                                 }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5))
                         ) {
-                            Text("Add Member")
+                            Text(t("team.add"))
                         }
                     }
                 }
@@ -4311,13 +4006,13 @@ fun CashbookView(
                 ) {
                     Column {
                         Text(
-                            text = "Cashbook Ledger",
+                            text = t("cash.title"),
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Black,
                             color = Color(0xFF0F172A)
                         )
                         Text(
-                            text = "Track garage income, expenses & daily cashflow",
+                            text = t("cash.subtitle"),
                             fontSize = 11.sp,
                             color = Color(0xFF64748B)
                         )
@@ -4364,7 +4059,7 @@ fun CashbookView(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    "NET CASH BALANCE",
+                                    t("cash.netBalance"),
                                     fontSize = 11.sp,
                                     letterSpacing = 1.sp,
                                     fontWeight = FontWeight.ExtraBold,
@@ -4925,7 +4620,6 @@ fun SystemCoordinatorView(
     fcmToken: String,
     searchQuery: String = "",
     onCreateJobClick: () -> Unit,
-    onOpenScanner: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedStockTab by remember { mutableStateOf("ALL") }
@@ -4936,6 +4630,7 @@ fun SystemCoordinatorView(
     var inputQty by remember { mutableStateOf("") }
     var inputPrice by remember { mutableStateOf("") }
     var inputMinAlert by remember { mutableStateOf("3") }
+    var inputStockType by remember { mutableStateOf("Spare") }
 
     val clipboardManager = LocalClipboardManager.current
 
@@ -4946,11 +4641,13 @@ fun SystemCoordinatorView(
             inputQty = itemToEdit.quantity.toString()
             inputPrice = if (itemToEdit.unitPrice > 0) itemToEdit.unitPrice.toString() else ""
             inputMinAlert = itemToEdit.minStockAlert.toString()
+            inputStockType = itemToEdit.stockType.ifBlank { "Spare" }
         } else {
             inputPartName = ""
             inputQty = ""
             inputPrice = ""
             inputMinAlert = "3"
+            inputStockType = "Spare"
         }
         showAddStockDialog = true
     }
@@ -4961,6 +4658,7 @@ fun SystemCoordinatorView(
             val matchesSearch = part.name.contains(searchQuery, ignoreCase = true)
             val matchesTab = when (selectedStockTab) {
                 "LOW STOCK" -> part.quantity <= part.minStockAlert
+                "SERVICE", "SPARE", "LUBE" -> part.stockType.equals(selectedStockTab, ignoreCase = true)
                 else -> true
             }
             matchesSearch && matchesTab
@@ -5019,7 +4717,7 @@ fun SystemCoordinatorView(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    listOf("ALL", "LOW STOCK").forEach { tab ->
+                    listOf("ALL", "SERVICE", "SPARE", "LUBE", "LOW STOCK").forEach { tab ->
                         val isActive = selectedStockTab == tab
                         val bg = if (isActive) Color(0xFF5B4DFF) else Color(0xFFE2E8F0)
                         val tc = if (isActive) Color.White else Color(0xFF475569)
@@ -5027,7 +4725,7 @@ fun SystemCoordinatorView(
                         val count = when (tab) {
                             "ALL" -> inventory.size
                             "LOW STOCK" -> inventory.count { it.quantity <= it.minStockAlert }
-                            else -> 0
+                            else -> inventory.count { it.stockType.equals(tab, ignoreCase = true) }
                         }
 
                         Box(
@@ -5182,6 +4880,19 @@ fun SystemCoordinatorView(
                                                 )
                                             }
 
+                                            Surface(
+                                                color = Color(0xFFEEF2FF),
+                                                shape = RoundedCornerShape(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = part.stockType.uppercase(),
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF4F46E5)
+                                                )
+                                            }
+
                                             Text(
                                                 text = "Alert under ${part.minStockAlert}",
                                                 fontSize = 11.sp,
@@ -5292,10 +5003,18 @@ fun SystemCoordinatorView(
 
                     Divider(color = Color(0xFFE2E8F0))
 
+                    SimpleFormDropdown(
+                        label = t("stock.type"),
+                        options = listOf("Service", "Spare", "Lube"),
+                        selectedOption = inputStockType,
+                        onOptionSelected = { inputStockType = it },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
                     OutlinedTextField(
                         value = inputPartName,
                         onValueChange = { inputPartName = it },
-                        label = { Text("Part / Item Name") },
+                        label = { Text(t("stock.name")) },
                         placeholder = { Text("e.g. Engine Oil 1L") },
                         modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -5315,7 +5034,7 @@ fun SystemCoordinatorView(
                         OutlinedTextField(
                             value = inputQty,
                             onValueChange = { inputQty = it },
-                            label = { Text("Quantity") },
+                            label = { Text(t("stock.qty")) },
                             placeholder = { Text("e.g. 10") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.weight(1f),
@@ -5332,7 +5051,7 @@ fun SystemCoordinatorView(
                         OutlinedTextField(
                             value = inputPrice,
                             onValueChange = { inputPrice = it },
-                            label = { Text("Unit Price (₹)") },
+                            label = { Text(t("stock.unitPrice")) },
                             placeholder = { Text("e.g. 450") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.weight(1f),
@@ -5350,7 +5069,7 @@ fun SystemCoordinatorView(
                     OutlinedTextField(
                         value = inputMinAlert,
                         onValueChange = { inputMinAlert = it },
-                        label = { Text("Low Stock Alert Threshold") },
+                        label = { Text(t("stock.alertLevel")) },
                         placeholder = { Text("e.g. 3") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier.fillMaxWidth(),
@@ -5380,6 +5099,7 @@ fun SystemCoordinatorView(
                                     viewModel.addInventoryItem(
                                         editingItem!!.copy(
                                             name = inputPartName.trim(),
+                                            stockType = inputStockType,
                                             quantity = qty,
                                             unitPrice = price,
                                             minStockAlert = minAlert
@@ -5389,6 +5109,7 @@ fun SystemCoordinatorView(
                                     // Same item name exists, add quantity to existing item
                                     viewModel.addInventoryItem(
                                         existingMatch.copy(
+                                            stockType = inputStockType,
                                             quantity = existingMatch.quantity + qty,
                                             unitPrice = if (price > 0) price else existingMatch.unitPrice,
                                             minStockAlert = minAlert
@@ -5399,6 +5120,7 @@ fun SystemCoordinatorView(
                                     viewModel.addInventoryItem(
                                         InventoryItemEntity(
                                             name = inputPartName.trim(),
+                                            stockType = inputStockType,
                                             quantity = qty,
                                             minStockAlert = minAlert,
                                             unitPrice = price
@@ -5497,19 +5219,18 @@ fun CreateJobCardSheet(
     inventory: List<InventoryItemEntity>,
     initialJob: JobCardEntity? = null,
     onDismiss: () -> Unit,
-    onScanQrClick: () -> Unit = {}
 ) {
     // Current Wizard Step: 1 -> Vehicle, Customer, Symptoms; 2 -> Work done, Parts Used, and Billing Rates (Saves directly)
     var step by remember { mutableIntStateOf(1) }
 
     // Step 1 Fields
-    var vehicleType by remember { mutableStateOf("Bike") }
+    var vehicleType by remember { mutableStateOf("") }
     var vehiclePlate by remember { mutableStateOf(initialJob?.vehiclePlate ?: "") } // Vehicle Number
-    var vehicleMake by remember { mutableStateOf("Honda") }
-    var vehicleModel by remember { mutableStateOf("Splendor") }
-    var vehicleVariant by remember { mutableStateOf("Splendor Pro") }
-    var kmReading by remember { mutableStateOf("0") }
-    var fuelLevel by remember { mutableStateOf("50") }
+    var vehicleMake by remember { mutableStateOf("") }
+    var vehicleModel by remember { mutableStateOf("") }
+    var vehicleVariant by remember { mutableStateOf("") }
+    var kmReading by remember { mutableStateOf("") }
+    var fuelLevel by remember { mutableStateOf("") }
 
     var customerName by remember { mutableStateOf(initialJob?.customerName ?: "") }
     var customerPhone by remember { mutableStateOf(initialJob?.customerPhone ?: "") }
@@ -5534,7 +5255,16 @@ fun CreateJobCardSheet(
         "Mahindra" to listOf("Scorpio", "Thar", "XUV700", "Bolero", "XUV300")
     )
 
-    val currentModels = modelsMap[vehicleMake] ?: listOf("Splendor", "Shine", "Activa", "i20", "Swift")
+    // Which makes are even offered depends on the vehicle type, so nothing can be picked
+    // until that first choice is made.
+    val twoWheelerMakes = listOf("Honda", "Hero", "Bajaj", "Yamaha", "TVS", "Suzuki")
+    val fourWheelerMakes = listOf("Maruti Suzuki", "Hyundai", "Tata", "Mahindra", "Honda")
+    val currentMakes = when (vehicleType) {
+        "Bike", "Scooter" -> twoWheelerMakes
+        "Car" -> fourWheelerMakes
+        else -> emptyList()
+    }
+    val currentModels = if (vehicleMake.isBlank()) emptyList() else modelsMap[vehicleMake].orEmpty()
 
     val variantsMap = mapOf(
         "Splendor" to listOf("Splendor Pro", "Standard", "Self Start", "iSmart", "Sports"),
@@ -5547,20 +5277,24 @@ fun CreateJobCardSheet(
         "Nexon" to listOf("XM", "XT", "XZ+", "XZ")
     )
 
-    val currentVariants = variantsMap[vehicleModel] ?: listOf("Splendor Pro", "Standard", "Base", "Pro", "Plus", "Top Model")
+    val currentVariants = if (vehicleModel.isBlank()) emptyList()
+        else variantsMap[vehicleModel] ?: listOf("Standard", "Base", "Pro", "Plus", "Top Model")
 
-    // Dynamic reset effects to ensure model matches make and variant matches model
-    LaunchedEffect(vehicleMake) {
-        val models = modelsMap[vehicleMake] ?: listOf("Splendor")
-        if (vehicleModel !in models) {
-            vehicleModel = models.firstOrNull() ?: "Splendor"
+    // Changing a parent choice only *clears* the children — it never picks one for the user.
+    LaunchedEffect(vehicleType) {
+        if (vehicleMake.isNotBlank() && vehicleMake !in currentMakes) {
+            vehicleMake = ""; vehicleModel = ""; vehicleVariant = ""
         }
     }
-
+    LaunchedEffect(vehicleMake) {
+        if (vehicleModel.isNotBlank() && vehicleModel !in modelsMap[vehicleMake].orEmpty()) {
+            vehicleModel = ""; vehicleVariant = ""
+        }
+    }
     LaunchedEffect(vehicleModel) {
-        val variants = variantsMap[vehicleModel] ?: listOf("Splendor Pro")
-        if (vehicleVariant !in variants) {
-            vehicleVariant = variants.firstOrNull() ?: "Splendor Pro"
+        val variants = variantsMap[vehicleModel].orEmpty()
+        if (vehicleVariant.isNotBlank() && variants.isNotEmpty() && vehicleVariant !in variants) {
+            vehicleVariant = ""
         }
     }
 
@@ -5687,11 +5421,6 @@ fun CreateJobCardSheet(
                                 label = { Text("Plate Number *", fontSize = 12.sp) },
                                 placeholder = { Text("MH12AB1234", fontSize = 12.sp) },
                                 singleLine = true,
-                                trailingIcon = {
-                                    IconButton(onClick = onScanQrClick) {
-                                        Icon(Icons.Default.QrCodeScanner, contentDescription = "Scan VIN", tint = DeepIndigo, modifier = Modifier.size(18.dp))
-                                    }
-                                },
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = DeepIndigo,
                                     focusedLabelColor = DeepIndigo,
@@ -5709,7 +5438,7 @@ fun CreateJobCardSheet(
                         ) {
                             SimpleFormDropdown(
                                 label = "Make",
-                                options = makes,
+                                options = currentMakes,
                                 selectedOption = vehicleMake,
                                 onOptionSelected = { vehicleMake = it },
                                 modifier = Modifier.weight(1f)
@@ -6019,7 +5748,9 @@ fun CreateJobCardSheet(
                     Button(
                         onClick = {
                             if (step == 1) {
-                                if (vehiclePlate.isBlank() || customerName.isBlank() || customerPhone.isBlank()) {
+                                if (vehicleType.isBlank()) {
+                                    validationError = "Please select the Vehicle Type first"
+                                } else if (vehiclePlate.isBlank() || customerName.isBlank() || customerPhone.isBlank()) {
                                     validationError = "Please fill out all required fields marked with *"
                                 } else if (customerPhone.filter { it.isDigit() }.length < 10) {
                                     validationError = "Please enter a valid 10-digit Phone Number"
@@ -6045,8 +5776,10 @@ fun CreateJobCardSheet(
                                         symptoms = symptoms,
                                         diagnosis = "Standard Checkup",
                                         status = "OPEN",
-                                        tasks = tasksSelected.ifEmpty { "Inspection Check" },
-                                        materials = partsListedSelection.ifEmpty { "Lubricants Oil Refill" },
+                                        // Start empty — items belong on the invoice only when
+                                        // the user actually adds them.
+                                        tasks = tasksSelected,
+                                        materials = partsListedSelection,
                                         serviceCharges = sc,
                                         partsCharges = pc,
                                         taxes = tax,
@@ -6682,7 +6415,8 @@ fun InvoiceBreakdownPage(
     viewModel: GarageViewModel,
     jobCard: JobCardEntity,
     onDismiss: () -> Unit,
-    onSavePdf: (JobCardEntity) -> Unit
+    onSavePdf: (JobCardEntity) -> Unit,
+    onPaidAndClosed: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -6916,14 +6650,14 @@ fun InvoiceBreakdownPage(
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("BILL TO", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                                    Text(t("inv.billTo"), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(activeJobCard.customerName, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
                                     Text("Phone: ${activeJobCard.customerPhone}", fontSize = 11.sp, color = Color(0xFF64748B))
                                 }
 
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text("VEHICLE INFO", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                                    Text(t("inv.vehicleInfo"), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(activeJobCard.vehiclePlate.uppercase(), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
                                     val cleanVehicle = activeJobCard.vehicleName.replace(Regex("(?i)Bike:|Scooter:|Car:"), "").trim()
@@ -6954,7 +6688,7 @@ fun InvoiceBreakdownPage(
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Add Service / Spare / Lube", color = Color(0xFF5B4DFF), fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text(t("inv.addItem"), color = Color(0xFF5B4DFF), fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                 }
 
                                 Spacer(modifier = Modifier.height(8.dp)) // compact spacer
@@ -6963,7 +6697,7 @@ fun InvoiceBreakdownPage(
                             }
 
                             // Row 4: Itemized Billing Table Layout
-                            Text("ITEMIZED BILLING", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(bottom = 6.dp))
+                            Text(t("inv.itemized"), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(bottom = 6.dp))
 
                             // Table Headers Row
                             Row(
@@ -7139,8 +6873,14 @@ fun InvoiceBreakdownPage(
 
                             // Terms and Signature lines
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text("TERMS & CONDITIONS:", fontWeight = FontWeight.Bold, fontSize = 8.sp, color = Color(0xFF94A3B8))
+                            Text(t("inv.terms"), fontWeight = FontWeight.Bold, fontSize = 8.sp, color = Color(0xFF94A3B8))
                             Text("1. Goods once sold or installed will not be taken back.\n2. Warranty on spare parts as per manufacturer specifications.", fontSize = 8.sp, color = Color(0xFF94A3B8))
+                            Text(
+                                "3. Next service due on ${com.example.util.InvoicePdfGenerator.nextServiceDueDate(activeJobCard.creationTime)} (3 months from this service).",
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF5B4DFF)
+                            )
 
                             Spacer(modifier = Modifier.height(18.dp))
 
@@ -7664,7 +7404,10 @@ fun InvoiceBreakdownPage(
             onDismiss = { showPaymentSelector = false },
             onPaymentConfirmed = { netReceived, mode ->
                 showPaymentSelector = false
-                onDismiss() // close main worksheet
+                // Deliberately do NOT dismiss: the worksheet stays open and re-reads the job as
+                // CLOSED, so the primary button becomes "Share SMS Invoice" and the owner can
+                // send it to the customer immediately. Back returns to the Closed list.
+                onPaidAndClosed()
 
                 // 1. Move status to CLOSED
                 viewModel.updateJobCardStatus(activeJobCard, "CLOSED")
@@ -7808,7 +7551,7 @@ fun ServiceIntervalsDialog(
                 ) {
                     Column {
                         Text(
-                            "Service Alerts & Reminders",
+                            t("rem.title"),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 17.sp,
                             color = DarkSlate
@@ -7851,7 +7594,7 @@ fun ServiceIntervalsDialog(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Active Intervals Due", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = DarkSlate)
+                        Text(t("rem.activeDue"), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = DarkSlate)
                         Button(
                             onClick = { showAddAlertDialog = true },
                             colors = ButtonDefaults.buttonColors(containerColor = DeepIndigo),
@@ -7860,7 +7603,7 @@ fun ServiceIntervalsDialog(
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("New Interval Alert", fontSize = 11.sp, color = Color.White)
+                            Text(t("rem.newAlert"), fontSize = 11.sp, color = Color.White)
                         }
                     }
 
@@ -7871,7 +7614,7 @@ fun ServiceIntervalsDialog(
                             modifier = Modifier.fillMaxSize().weight(1f),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text("No upcoming service alerts registered.", color = Color.Gray)
+                            Text(t("rem.none"), color = Color.Gray)
                         }
                     } else {
                         LazyColumn(
@@ -7943,7 +7686,9 @@ fun ServiceIntervalsDialog(
             onAddAlert = { alert ->
                 viewModel.addServiceAlert(alert)
                 showAddAlertDialog = false
-            }
+            },
+            customers = viewModel.customerProfiles.collectAsState().value,
+            jobs = viewModel.jobCards.collectAsState().value
         )
     }
 }
@@ -8045,8 +7790,20 @@ fun ServiceAlertCard(
 @Composable
 fun AddServiceAlertDialog(
     onDismiss: () -> Unit,
-    onAddAlert: (ServiceAlertEntity) -> Unit
+    onAddAlert: (ServiceAlertEntity) -> Unit,
+    customers: List<CustomerProfileEntity> = emptyList(),
+    jobs: List<JobCardEntity> = emptyList()
 ) {
+    // Reminders are always for someone already on the books, so the customer is picked from a
+    // list rather than retyped — that also fills in the phone and plate automatically.
+    data class Contact(val name: String, val phone: String, val plate: String)
+    val contacts = remember(customers, jobs) {
+        (customers.map { Contact(it.name, it.phone, it.vehiclePlate) } +
+            jobs.map { Contact(it.customerName, it.customerPhone, it.vehiclePlate) })
+            .filter { it.name.isNotBlank() }
+            .distinctBy { it.name.lowercase() to it.plate.lowercase() }
+            .sortedBy { it.name.lowercase() }
+    }
     var custName by remember { mutableStateOf("") }
     var custPhone by remember { mutableStateOf("") }
     var plate by remember { mutableStateOf("") }
@@ -8065,20 +7822,40 @@ fun AddServiceAlertDialog(
                 modifier = Modifier.fillMaxWidth().padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("New Service Interval Reminder", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = DarkSlate)
+                Text(t("rem.newTitle"), fontWeight = FontWeight.Bold, fontSize = 16.sp, color = DarkSlate)
                 Divider(color = Color(0xFFE2E8F0))
 
-                OutlinedTextField(value = custName, onValueChange = { custName = it }, label = { Text("Customer Name") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = custPhone, onValueChange = { custPhone = it }, label = { Text("Customer Phone") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = plate, onValueChange = { plate = it }, label = { Text("Vehicle Plate") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = serviceType, onValueChange = { serviceType = it }, label = { Text("Service Type") }, modifier = Modifier.fillMaxWidth())
+                if (contacts.isEmpty()) {
+                    Text(
+                        "No customers yet — add a customer or job card first.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFEF4444)
+                    )
+                } else {
+                    SimpleFormDropdown(
+                        label = t("rem.customer"),
+                        options = contacts.map { it.name },
+                        selectedOption = custName,
+                        onOptionSelected = { picked ->
+                            custName = picked
+                            contacts.firstOrNull { it.name == picked }?.let {
+                                custPhone = it.phone
+                                if (it.plate.isNotBlank()) plate = it.plate
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                OutlinedTextField(value = custPhone, onValueChange = { custPhone = it }, label = { Text(t("rem.customerPhone")) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = plate, onValueChange = { plate = it }, label = { Text(t("rem.plate")) }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = serviceType, onValueChange = { serviceType = it }, label = { Text(t("rem.serviceType")) }, modifier = Modifier.fillMaxWidth())
                 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = intervalKm, onValueChange = { intervalKm = it }, label = { Text("Interval KM") }, modifier = Modifier.weight(1f))
-                    OutlinedTextField(value = dueDays, onValueChange = { dueDays = it }, label = { Text("Due in Days") }, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = intervalKm, onValueChange = { intervalKm = it }, label = { Text(t("rem.intervalKm")) }, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = dueDays, onValueChange = { dueDays = it }, label = { Text(t("rem.dueDays")) }, modifier = Modifier.weight(1f))
                 }
 
-                OutlinedTextField(value = notes, onValueChange = { notes = it }, label = { Text("Reminder Notes") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(value = notes, onValueChange = { notes = it }, label = { Text(t("rem.notes")) }, modifier = Modifier.fillMaxWidth())
 
                 Button(
                     onClick = {
@@ -8105,7 +7882,7 @@ fun AddServiceAlertDialog(
                     colors = ButtonDefaults.buttonColors(containerColor = DeepIndigo),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Save Service Alert", color = Color.White, fontWeight = FontWeight.Bold)
+                    Text(t("rem.save"), color = Color.White, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -8465,7 +8242,6 @@ fun CustomersManagementView(
     customerProfiles: List<CustomerProfileEntity>,
     jobList: List<JobCardEntity>,
     searchQuery: String = "",
-    onOpenScanner: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var selectedTab by remember { mutableStateOf("Client Profiles") }
@@ -8512,7 +8288,7 @@ fun CustomersManagementView(
             ) {
                 Column {
                     Text(
-                        text = "Customer Management",
+                        text = t("cust.title"),
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Black,
                         color = DarkSlate

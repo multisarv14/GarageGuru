@@ -123,6 +123,14 @@
       ]
     },
     {
+      "collectionGroup": "teamMembers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "garageId", "order": "ASCENDING" },
+        { "fieldPath": "name", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "serviceAlerts",
       "queryScope": "COLLECTION",
       "fields": [

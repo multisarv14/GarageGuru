@@ -65,8 +65,9 @@ MARK_R = max_radius(MARK)
 BADGE = extract_badge()
 
 # Badge diameter on the 108dp canvas. The visible area of an adaptive icon is 72dp;
-# 70dp keeps a hair of margin so no mask shaves the outer chrome rim.
-BADGE_DP = 70
+# 60dp sits comfortably inside the 66dp safe zone, so the badge reads as a smaller,
+# cleanly centred coin with breathing room on every launcher.
+BADGE_DP = 60
 
 # Adaptive icons: 108dp canvas, keep the mark inside the 66dp safe circle (r=33dp).
 SAFE_R = 32.5

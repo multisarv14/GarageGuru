@@ -20,9 +20,11 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.TeamMemberEntity
 import com.example.data.repository.GarageRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -43,6 +45,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
     val memberships = repository.allMemberships.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val customerProfiles = repository.allCustomerProfiles.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val serviceAlerts = repository.allServiceAlerts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val teamMembers = repository.allTeamMembers.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // --- Network & Security UI Signals ---
     private val _isOffline = MutableStateFlow(false)
@@ -244,6 +247,47 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
         }
     }
 
+    // --- Team Member Actions ---
+    fun addTeamMember(member: TeamMemberEntity) {
+        viewModelScope.launch {
+            val assignedId = repository.insertTeamMember(member)
+            val saved = if (member.id == 0) member.copy(id = assignedId.toInt()) else member
+            com.example.data.api.FirebaseSyncHelper.saveTeamMember(saved)
+        }
+    }
+
+    fun deleteTeamMember(id: Int) {
+        viewModelScope.launch {
+            repository.deleteTeamMemberById(id)
+            com.example.data.api.FirebaseSyncHelper.deleteTeamMember(id)
+        }
+    }
+
+    /**
+     * Keeps exactly one owner row in step with the signed-in account.
+     *
+     * Must run *after* the cloud pull, otherwise it would create a second owner row while the
+     * real one is still on its way down from Firestore. Any duplicates that already slipped
+     * through are collapsed here.
+     */
+    private suspend fun reconcileOwnerTeamMember(name: String, phone: String) {
+        if (name.isBlank()) return
+        val owners = repository.allTeamMembers.first().filter { it.isOwner }
+
+        // Collapse accidental duplicates down to the oldest row.
+        owners.drop(1).forEach { extra ->
+            repository.deleteTeamMemberById(extra.id)
+            com.example.data.api.FirebaseSyncHelper.deleteTeamMember(extra.id)
+        }
+
+        val existing = owners.firstOrNull()
+        if (existing == null) {
+            addTeamMember(TeamMemberEntity(name = name, role = "Owner", phone = phone, isOwner = true))
+        } else if (existing.name != name || existing.phone != phone) {
+            addTeamMember(existing.copy(name = name, phone = phone))
+        }
+    }
+
     // --- Cloud Sync ---
 
     /**
@@ -285,6 +329,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                     }
                     onDone(0, local.total)
                 }
+                reconcileOwnerTeamMember(session.ownerName, session.ownerPhone)
             } catch (e: Exception) {
                 Log.e(TAG, "Cloud sync failed", e)
                 _lastSyncMessage.value = "Sync failed: ${e.message}"

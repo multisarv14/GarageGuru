@@ -7,6 +7,7 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.TeamMemberEntity
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -77,6 +78,19 @@ interface GarageDao {
 
     @Query("UPDATE service_alerts SET status = :status WHERE id = :id")
     suspend fun updateServiceAlertStatus(id: Int, status: String)
+
+    // --- Team Members ---
+    @Query("SELECT * FROM team_members ORDER BY isOwner DESC, name ASC")
+    fun getAllTeamMembers(): Flow<List<TeamMemberEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTeamMember(member: TeamMemberEntity): Long
+
+    @Query("DELETE FROM team_members WHERE id = :id")
+    suspend fun deleteTeamMemberById(id: Int)
+
+    @Query("DELETE FROM team_members")
+    suspend fun clearTeamMembers()
 
     // --- Wipe (used when the signed-in workshop changes, so one garage never
     // --- inherits another's rows from a previous session on the same device) ---

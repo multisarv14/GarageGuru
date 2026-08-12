@@ -94,6 +94,12 @@ object GarageSession {
     // --- Which workshop's rows are currently sitting in Room ---
 
     private const val KEY_LOCAL_GARAGE = "localDataGarageId"
+    private const val KEY_LANGUAGE = "appLanguage"
+
+    /** Chosen UI language (en / hi / mr). Survives restarts so the app opens in it. */
+    var appLanguage: String
+        get() = prefs?.getString(KEY_LANGUAGE, "en") ?: "en"
+        set(value) { prefs?.edit()?.putString(KEY_LANGUAGE, value)?.apply() }
 
     /**
      * The garage whose data the local Room database currently holds. When this stops matching

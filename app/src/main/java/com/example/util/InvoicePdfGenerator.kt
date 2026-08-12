@@ -40,6 +40,15 @@ object InvoicePdfGenerator {
 
     private const val TAG = "InvoicePdfGenerator"
 
+    /** Workshops quote a three-month interval, so the invoice carries the next due date. */
+    fun nextServiceDueDate(fromMillis: Long): String {
+        val cal = java.util.Calendar.getInstance().apply {
+            timeInMillis = fromMillis
+            add(java.util.Calendar.MONTH, 3)
+        }
+        return java.text.SimpleDateFormat("dd-MM-yyyy", java.util.Locale.getDefault()).format(cal.time)
+    }
+
     fun generatePdfFile(context: Context, job: JobCardEntity): File? {
         try {
             val pdfDocument = PdfDocument()
@@ -280,6 +289,14 @@ object InvoicePdfGenerator {
             textPaint.color = Color.parseColor("#94A3B8")
             canvas.drawText("1. Goods once sold or fitted will not be returned/exchanged.", 36f, footerY + 12f, textPaint)
             canvas.drawText("2. Warranty on spare parts as per OEM manufacturer terms only.", 36f, footerY + 22f, textPaint)
+            textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textPaint.color = Color.parseColor("#5B4DFF")
+            canvas.drawText(
+                "3. Next service due on ${nextServiceDueDate(job.creationTime)} (3 months from this service).",
+                36f, footerY + 32f, textPaint
+            )
+            textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+            textPaint.color = Color.parseColor("#94A3B8")
 
             // Signature Lines
             borderPaint.color = Color.parseColor("#CBD5E1")

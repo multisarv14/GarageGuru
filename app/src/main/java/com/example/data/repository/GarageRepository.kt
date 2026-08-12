@@ -7,6 +7,7 @@ import com.example.data.model.CustomerProfileEntity
 import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
+import com.example.data.model.TeamMemberEntity
 import com.example.data.model.ServiceMembershipEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -20,6 +21,7 @@ class GarageRepository(private val dao: GarageDao) {
     val allMemberships: Flow<List<ServiceMembershipEntity>> = dao.getAllMemberships()
     val allCustomerProfiles: Flow<List<CustomerProfileEntity>> = dao.getAllCustomerProfiles()
     val allServiceAlerts: Flow<List<ServiceAlertEntity>> = dao.getAllServiceAlerts()
+    val allTeamMembers: Flow<List<TeamMemberEntity>> = dao.getAllTeamMembers()
 
     // --- Suspend Functions ---
     suspend fun getJobCardById(id: Int): JobCardEntity? = dao.getJobCardById(id)
@@ -42,6 +44,9 @@ class GarageRepository(private val dao: GarageDao) {
     suspend fun deleteServiceAlertById(id: Int) = dao.deleteServiceAlertById(id)
     suspend fun updateServiceAlertStatus(id: Int, status: String) = dao.updateServiceAlertStatus(id, status)
 
+    suspend fun insertTeamMember(member: TeamMemberEntity): Long = dao.insertTeamMember(member)
+    suspend fun deleteTeamMemberById(id: Int) = dao.deleteTeamMemberById(id)
+
     // --- Cloud <-> local bridging ---
 
     /** Writes everything Firestore returned into Room. Ids match, so REPLACE keeps rows in step. */
@@ -52,6 +57,7 @@ class GarageRepository(private val dao: GarageDao) {
         snapshot.memberships.forEach { dao.insertMembership(it) }
         snapshot.customers.forEach { dao.insertCustomerProfile(it) }
         snapshot.serviceAlerts.forEach { dao.insertServiceAlert(it) }
+        snapshot.teamMembers.forEach { dao.insertTeamMember(it) }
     }
 
     /** The whole local database, shaped for an upload. */
@@ -61,7 +67,8 @@ class GarageRepository(private val dao: GarageDao) {
         inventoryItems = allInventoryItems.first(),
         memberships = allMemberships.first(),
         customers = allCustomerProfiles.first(),
-        serviceAlerts = allServiceAlerts.first()
+        serviceAlerts = allServiceAlerts.first(),
+        teamMembers = allTeamMembers.first()
     )
 
     /**
@@ -75,6 +82,7 @@ class GarageRepository(private val dao: GarageDao) {
         dao.clearMemberships()
         dao.clearCustomerProfiles()
         dao.clearServiceAlerts()
+        dao.clearTeamMembers()
         dao.resetAutoIncrement()
     }
 }

@@ -30,10 +30,10 @@ object FirebaseAuthHelper {
     /**
      * Sends a Firebase password-reset mail.
      *
-     * Only works for accounts registered with a real email address. Workshops that signed up
-     * with a mobile number get the synthetic `user_<digits>@garageguru.local` identity, and no
-     * mail can ever reach that domain — so those are rejected up front with an honest message
-     * rather than a "check your inbox" that never arrives.
+     * A mobile number maps to the synthetic `user_<digits>@garageguru.local` identity, which no
+     * mail can ever reach, so for those we look up the recovery address captured at sign up and
+     * send there instead. Accounts with no recovery address get an honest refusal rather than a
+     * "check your inbox" that never arrives.
      */
     fun sendPasswordReset(identity: String, callback: (success: Boolean, message: String) -> Unit) {
         val trimmed = identity.trim()
@@ -41,16 +41,36 @@ object FirebaseAuthHelper {
             callback(false, "Enter your registered mobile number or email first")
             return
         }
-        if (!trimmed.contains("@")) {
-            callback(
-                false,
-                "This account is registered with a mobile number, so we cannot email a reset link. " +
-                    "Please contact your garage admin to reset the password."
-            )
+        if (trimmed.contains("@")) {
+            sendResetTo(trimmed, callback)
             return
         }
-        auth.sendPasswordResetEmail(trimmed)
-            .addOnSuccessListener { callback(true, "Password reset link sent to $trimmed") }
+
+        // A mobile number was typed. The login identity itself is synthetic and unreachable, so
+        // look up the recovery address the owner gave at sign up.
+        val loginEmail = identityToEmail(trimmed)
+        db.collection("admin").whereEqualTo("email", loginEmail).limit(1).get()
+            .addOnSuccessListener { snap ->
+                val recovery = snap.documents.firstOrNull()?.getString("contactEmail").orEmpty()
+                if (recovery.isBlank()) {
+                    callback(
+                        false,
+                        "No recovery email is saved for this mobile number. Ask your garage admin " +
+                            "to reset it, or add an email id in Account settings."
+                    )
+                } else {
+                    sendResetTo(recovery, callback)
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Recovery lookup failed", e)
+                callback(false, e.localizedMessage ?: "Could not look up your account")
+            }
+    }
+
+    private fun sendResetTo(address: String, callback: (Boolean, String) -> Unit) {
+        auth.sendPasswordResetEmail(address)
+            .addOnSuccessListener { callback(true, "Password reset link sent to $address") }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Password reset failed", e)
                 callback(false, e.localizedMessage ?: "Could not send reset link")
@@ -69,6 +89,7 @@ object FirebaseAuthHelper {
         phone: String,
         password: String,
         city: String = "",
+        contactEmail: String = "",
         callback: (success: Boolean, message: String) -> Unit
     ) {
         val email = identityToEmail(phone)
@@ -94,6 +115,7 @@ object FirebaseAuthHelper {
                     "ownerUid" to uid,
                     "ownerName" to ownerName,
                     "ownerEmail" to email,
+                    "contactEmail" to contactEmail,
                     "phone" to phone,
                     "address" to city,
                     "city" to city,
@@ -114,6 +136,7 @@ object FirebaseAuthHelper {
                     "uid" to uid,
                     "name" to ownerName,
                     "email" to email,
+                    "contactEmail" to contactEmail,
                     "phone" to phone,
                     "garageId" to garageId,
                     "role" to "Owner",

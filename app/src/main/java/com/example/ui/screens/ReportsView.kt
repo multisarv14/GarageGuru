@@ -29,6 +29,8 @@ import com.example.data.model.ServiceMembershipEntity
 import com.example.ui.GarageViewModel
 import com.example.ui.theme.CoolGrayBorder
 import com.example.ui.theme.DarkSlate
+import com.example.ui.i18n.LocalAppLanguage
+import com.example.ui.i18n.t
 import com.example.ui.theme.DeepIndigo
 import java.util.Calendar
 
@@ -36,11 +38,11 @@ import java.util.Calendar
 // VIEW 6: REPORTS (business summary over a period)
 // ==========================================
 
-enum class ReportPeriod(val label: String) {
-    TODAY("Today"),
-    WEEK("7 Days"),
-    MONTH("This Month"),
-    ALL("All Time")
+enum class ReportPeriod(val label: String, val key: String) {
+    TODAY("Today", "rep.today"),
+    WEEK("7 Days", "rep.week"),
+    MONTH("This Month", "rep.month"),
+    ALL("All Time", "rep.allTime")
 }
 
 /** Epoch millis the period starts at; 0 means "everything". */
@@ -176,9 +178,9 @@ fun ReportsView(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text("Reports", fontSize = 20.sp, fontWeight = FontWeight.Black, color = Color(0xFF1E293B))
+                    Text(t("rep.title"), fontSize = 20.sp, fontWeight = FontWeight.Black, color = Color(0xFF1E293B))
                     Text(
-                        text = if (isSyncing) "Syncing with cloud…" else "Live from your Garage Guru cloud data",
+                        text = if (isSyncing) t("rep.syncing") else t("rep.subtitle"),
                         fontSize = 11.sp,
                         color = if (isSyncing) DeepIndigo else Color(0xFF64748B)
                     )
@@ -211,7 +213,7 @@ fun ReportsView(
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = option.label,
+                            text = t(option.key),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (selected) Color.White else Color(0xFF64748B)
@@ -241,7 +243,7 @@ fun ReportsView(
             ) {
                 Column {
                     Text(
-                        "NET FOR ${period.label.uppercase()}",
+                        t("rep.netFor") + " " + period.label.uppercase(),
                         fontSize = 10.sp,
                         letterSpacing = 1.sp,
                         fontWeight = FontWeight.ExtraBold,
@@ -256,8 +258,8 @@ fun ReportsView(
                     )
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        MiniStat("INCOME", money(figures.income), Color(0xFF34D399), Modifier.weight(1f))
-                        MiniStat("EXPENSE", money(figures.expense), Color(0xFFFCA5A5), Modifier.weight(1f))
+                        MiniStat(t("cash.income"), money(figures.income), Color(0xFF34D399), Modifier.weight(1f))
+                        MiniStat(t("cash.expense"), money(figures.expense), Color(0xFFFCA5A5), Modifier.weight(1f))
                     }
                 }
             }
@@ -265,23 +267,23 @@ fun ReportsView(
 
         // Job throughput
         item {
-            ReportCard("JOB CARDS") {
+            ReportCard(t("rep.jobCards")) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    CountTile("${figures.jobsCreated}", "CREATED", Color(0xFF2563EB), Modifier.weight(1f))
+                    CountTile("${figures.jobsCreated}", t("rep.created"), Color(0xFF2563EB), Modifier.weight(1f))
                     CountTile("${figures.jobsCompleted}", "COMPLETED", Color(0xFF10B981), Modifier.weight(1f))
                     CountTile("${figures.jobsClosed}", "CLOSED", Color(0xFF334155), Modifier.weight(1f))
                 }
                 Spacer(Modifier.height(10.dp))
-                StatRow("Total invoiced", money(figures.invoiced), bold = true)
-                StatRow("Labour charges", money(figures.labour))
-                StatRow("Spares / parts", money(figures.parts))
-                StatRow("Tax collected", money(figures.taxes))
+                StatRow(t("rep.totalInvoiced"), money(figures.invoiced), bold = true)
+                StatRow(t("rep.labour"), money(figures.labour))
+                StatRow(t("rep.parts"), money(figures.parts))
+                StatRow(t("rep.tax"), money(figures.taxes))
             }
         }
 
         if (figures.byPaymentMode.isNotEmpty()) {
             item {
-                ReportCard("INCOME BY PAYMENT MODE") {
+                ReportCard(t("rep.byPaymentMode")) {
                     val top = figures.byPaymentMode.first().second
                     figures.byPaymentMode.forEach { (mode, amount) ->
                         BarRow(mode, money(amount), if (top > 0) (amount / top).toFloat() else 0f, DeepIndigo)
@@ -292,7 +294,7 @@ fun ReportsView(
 
         if (figures.byCategory.isNotEmpty()) {
             item {
-                ReportCard("INCOME BY CATEGORY") {
+                ReportCard(t("rep.byCategory")) {
                     val top = figures.byCategory.first().second
                     figures.byCategory.forEach { (cat, amount) ->
                         BarRow(cat, money(amount), if (top > 0) (amount / top).toFloat() else 0f, Color(0xFF10B981))
@@ -303,7 +305,7 @@ fun ReportsView(
 
         if (figures.topCustomers.isNotEmpty()) {
             item {
-                ReportCard("TOP CUSTOMERS") {
+                ReportCard(t("rep.topCustomers")) {
                     figures.topCustomers.forEachIndexed { index, (name, amount) ->
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
@@ -341,16 +343,16 @@ fun ReportsView(
 
         // Stock and subscriptions are position figures, not period figures.
         item {
-            ReportCard("STOCK & SUBSCRIPTIONS") {
-                StatRow("Stock on hand (value)", money(figures.stockValue), bold = true)
+            ReportCard(t("rep.stockSubs")) {
+                StatRow(t("rep.stockValue"), money(figures.stockValue), bold = true)
                 StatRow(
-                    "Items below alert level",
+                    t("rep.belowAlert"),
                     "${figures.lowStockCount}",
                     valueColor = if (figures.lowStockCount > 0) Color(0xFFEF4444) else Color(0xFF10B981)
                 )
-                StatRow("Active memberships", "${figures.activeMemberships}")
+                StatRow(t("rep.activeMemberships"), "${figures.activeMemberships}")
                 StatRow(
-                    "Membership dues pending",
+                    t("rep.duesPending"),
                     money(figures.membershipDues),
                     valueColor = if (figures.membershipDues > 0) Color(0xFFEF4444) else DarkSlate
                 )
