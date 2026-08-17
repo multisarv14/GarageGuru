@@ -18,7 +18,16 @@ data class JobCardEntity(
     val serviceCharges: Double = 0.0,
     val partsCharges: Double = 0.0,
     val taxes: Double = 0.0,
+    /** Flat rupee amount knocked off the bill; shown as its own deduction line on the invoice. */
+    val discount: Double = 0.0,
     val totalAmount: Double = 0.0,
+    // Vehicle particulars kept as their own columns rather than only inside [vehicleName], so the
+    // invoice and the printed PDF can lay them out — and the owner can correct them — field by field.
+    val vehicleMake: String = "",
+    val vehicleModel: String = "",
+    val vehicleVariant: String = "",
+    val vehicleKm: String = "",
+    val vehicleFuel: String = "",
     val creationTime: Long = System.currentTimeMillis()
 )
 
@@ -43,6 +52,29 @@ data class InventoryItemEntity(
     val unitPrice: Double
 )
 
+/**
+ * One withdrawal from the stock room.
+ *
+ * Every issue has already been subtracted from [InventoryItemEntity.quantity]; this table is the
+ * audit trail that explains *why* the count dropped — which part, how many, who took it and for
+ * which job — so a shortfall at stock-take can be traced instead of guessed at.
+ */
+@Entity(tableName = "stock_issues")
+data class StockIssueEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val inventoryItemId: Int,
+    val itemName: String,
+    val quantity: Int,
+    val unitPrice: Double = 0.0,
+    val issuedTo: String = "",
+    /** Job card this stock went to, or 0 for a counter sale / internal use. */
+    val jobCardId: Int = 0,
+    val reason: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    val totalValue: Double get() = quantity * unitPrice
+}
+
 @Entity(tableName = "service_memberships")
 data class ServiceMembershipEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
@@ -58,6 +90,8 @@ data class ServiceMembershipEntity(
 @Entity(tableName = "customer_profiles")
 data class CustomerProfileEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    /** Human-readable client code (CL-0001) minted when the profile is first saved. */
+    val clientId: String = "",
     val name: String,
     val phone: String,
     val email: String = "",

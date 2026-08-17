@@ -20,6 +20,7 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.StockIssueEntity
 import com.example.data.model.TeamMemberEntity
 import com.example.data.repository.GarageRepository
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +47,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
     val customerProfiles = repository.allCustomerProfiles.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val serviceAlerts = repository.allServiceAlerts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val teamMembers = repository.allTeamMembers.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val stockIssues = repository.allStockIssues.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // --- Network & Security UI Signals ---
     private val _isOffline = MutableStateFlow(false)
@@ -180,6 +182,73 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
         }
     }
 
+    /**
+     * Moves [delta] units in or out of a stock row and writes the new count through to the cloud.
+     *
+     * Negative deltas consume stock (a part added to an invoice), positive ones give it back (that
+     * same part removed again). The count is floored at zero so a double-consume can never leave a
+     * negative quantity behind.
+     */
+    fun adjustInventoryQuantity(item: InventoryItemEntity, delta: Int) {
+        if (delta == 0) return
+        viewModelScope.launch {
+            val fresh = inventoryItems.value.find { it.id == item.id } ?: item
+            val updated = fresh.copy(quantity = (fresh.quantity + delta).coerceAtLeast(0))
+            repository.insertInventoryItem(updated)
+            com.example.data.api.FirebaseSyncHelper.saveInventoryItem(updated)
+        }
+    }
+
+    // --- Stock Issue Actions ---
+
+    /**
+     * Records a withdrawal from the stock room and deducts it from the item's quantity in one go,
+     * so the ledger and the shelf can never disagree.
+     */
+    fun issueStock(
+        item: InventoryItemEntity,
+        quantity: Int,
+        issuedTo: String,
+        reason: String,
+        jobCardId: Int = 0
+    ) {
+        if (quantity <= 0) return
+        viewModelScope.launch {
+            val fresh = inventoryItems.value.find { it.id == item.id } ?: item
+            val issued = quantity.coerceAtMost(fresh.quantity.coerceAtLeast(0))
+            if (issued <= 0) return@launch
+
+            val updatedItem = fresh.copy(quantity = fresh.quantity - issued)
+            repository.insertInventoryItem(updatedItem)
+            com.example.data.api.FirebaseSyncHelper.saveInventoryItem(updatedItem)
+
+            val issue = StockIssueEntity(
+                inventoryItemId = fresh.id,
+                itemName = fresh.name,
+                quantity = issued,
+                unitPrice = fresh.unitPrice,
+                issuedTo = issuedTo,
+                jobCardId = jobCardId,
+                reason = reason
+            )
+            val assignedId = repository.insertStockIssue(issue)
+            com.example.data.api.FirebaseSyncHelper.saveStockIssue(issue.copy(id = assignedId.toInt()))
+        }
+    }
+
+    /** Reverses an issue: the log entry goes away and the units go back on the shelf. */
+    fun revertStockIssue(issue: StockIssueEntity) {
+        viewModelScope.launch {
+            inventoryItems.value.find { it.id == issue.inventoryItemId }?.let { item ->
+                val restored = item.copy(quantity = item.quantity + issue.quantity)
+                repository.insertInventoryItem(restored)
+                com.example.data.api.FirebaseSyncHelper.saveInventoryItem(restored)
+            }
+            repository.deleteStockIssueById(issue.id)
+            com.example.data.api.FirebaseSyncHelper.deleteStockIssue(issue.id)
+        }
+    }
+
     // --- Membership Actions ---
     fun addMembership(membership: ServiceMembershipEntity) {
         viewModelScope.launch {
@@ -207,13 +276,28 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
     }
 
     // --- Customer Profile Actions ---
+
+    /**
+     * Saves a client profile, minting a Client ID for it the first time.
+     *
+     * Room hands back the row id on insert, so the code is derived from that rather than from a
+     * counter the app would have to keep in step by hand — two clients can never share one.
+     */
     fun addCustomerProfile(customer: CustomerProfileEntity) {
         viewModelScope.launch {
             val assignedId = repository.insertCustomerProfile(customer)
-            val finalCustomer = if (customer.id == 0) customer.copy(id = assignedId.toInt()) else customer
+            val withId = if (customer.id == 0) customer.copy(id = assignedId.toInt()) else customer
+            val finalCustomer = if (withId.clientId.isBlank()) {
+                val numbered = withId.copy(clientId = clientCodeFor(withId.id))
+                repository.insertCustomerProfile(numbered)
+                numbered
+            } else withId
             com.example.data.api.FirebaseSyncHelper.saveCustomerProfile(finalCustomer)
         }
     }
+
+    /** `CL-0007` style code shown on the profile card and printed on the invoice. */
+    private fun clientCodeFor(rowId: Int): String = "CL-%04d".format(rowId)
 
     fun deleteCustomerProfile(id: Int) {
         viewModelScope.launch {
@@ -421,7 +505,13 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                     .put("serviceCharges", it.serviceCharges)
                     .put("partsCharges", it.partsCharges)
                     .put("taxes", it.taxes)
+                    .put("discount", it.discount)
                     .put("totalAmount", it.totalAmount)
+                    .put("vehicleMake", it.vehicleMake)
+                    .put("vehicleModel", it.vehicleModel)
+                    .put("vehicleVariant", it.vehicleVariant)
+                    .put("vehicleKm", it.vehicleKm)
+                    .put("vehicleFuel", it.vehicleFuel)
                     .put("creationTime", it.creationTime)
                 jobsArray.put(obj)
             }
@@ -448,6 +538,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                 val obj = JSONObject()
                     .put("id", it.id)
                     .put("name", it.name)
+                    .put("stockType", it.stockType)
                     .put("quantity", it.quantity)
                     .put("minStockAlert", it.minStockAlert)
                     .put("unitPrice", it.unitPrice)
@@ -504,7 +595,13 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                                 serviceCharges = obj.optDouble("serviceCharges", 0.0),
                                 partsCharges = obj.optDouble("partsCharges", 0.0),
                                 taxes = obj.optDouble("taxes", 0.0),
+                                discount = obj.optDouble("discount", 0.0),
                                 totalAmount = obj.optDouble("totalAmount", 0.0),
+                                vehicleMake = obj.optString("vehicleMake", ""),
+                                vehicleModel = obj.optString("vehicleModel", ""),
+                                vehicleVariant = obj.optString("vehicleVariant", ""),
+                                vehicleKm = obj.optString("vehicleKm", ""),
+                                vehicleFuel = obj.optString("vehicleFuel", ""),
                                 creationTime = obj.optLong("creationTime", System.currentTimeMillis())
                             )
                         )
@@ -537,6 +634,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                         repository.insertInventoryItem(
                             InventoryItemEntity(
                                 name = obj.optString("name", ""),
+                                stockType = obj.optString("stockType", "Spare"),
                                 quantity = obj.optInt("quantity", 0),
                                 minStockAlert = obj.optInt("minStockAlert", 5),
                                 unitPrice = obj.optDouble("unitPrice", 0.0)

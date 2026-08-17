@@ -49,7 +49,13 @@ object InvoicePdfGenerator {
         return java.text.SimpleDateFormat("dd-MM-yyyy", java.util.Locale.getDefault()).format(cal.time)
     }
 
-    fun generatePdfFile(context: Context, job: JobCardEntity): File? {
+    /**
+     * Renders the invoice.
+     *
+     * [clientCode] is the customer's own Client ID; the workshop's is read from [GarageSettings].
+     * Both are printed so a paper invoice can be traced back to a record without a phone number.
+     */
+    fun generatePdfFile(context: Context, job: JobCardEntity, clientCode: String = ""): File? {
         try {
             val pdfDocument = PdfDocument()
             // Standard A4 dimensions: 595 x 842 points
@@ -110,12 +116,31 @@ object InvoicePdfGenerator {
 
             canvas.drawText(session.garageName.ifBlank { "Garage Guru" }.uppercase(), textLeft, 68f, textPaint)
 
+            val settings = com.example.data.api.GarageSettings.current
+
             textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             textPaint.textSize = 9f
             textPaint.color = Color.parseColor("#64748B")
-            canvas.drawText("Automotive Repair, Servicing & Spare Parts Center", textLeft, 82f, textPaint)
+            // The header stacks whatever the workshop has actually filled in, so a garage with no
+            // address or no GSTIN gets a tidy header rather than blank labels.
+            var headerY = 82f
+            canvas.drawText(
+                settings.address.ifBlank { "Automotive Repair, Servicing & Spare Parts Center" },
+                textLeft, headerY, textPaint
+            )
+            headerY += 12f
             if (session.ownerPhone.isNotBlank()) {
-                canvas.drawText("Tel: ${session.ownerPhone}", textLeft, 94f, textPaint)
+                canvas.drawText("Tel: ${session.ownerPhone}", textLeft, headerY, textPaint)
+                headerY += 12f
+            }
+            if (settings.gstEnabled && settings.gstin.isNotBlank()) {
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                canvas.drawText("GSTIN: ${settings.gstin}", textLeft, headerY, textPaint)
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                headerY += 12f
+            }
+            if (settings.clientId.isNotBlank()) {
+                canvas.drawText("Client ID: ${settings.clientId}", textLeft, headerY, textPaint)
             }
 
             // Right side Header: TAX INVOICE
@@ -137,8 +162,8 @@ object InvoicePdfGenerator {
             canvas.drawText("Date: $dateStr", 400f, 96f, textPaint)
 
             // 3. Customer & Vehicle Box
-            val boxTop = 110f
-            val boxBottom = 175f
+            val boxTop = 122f
+            val boxBottom = 200f
             canvas.drawRect(36f, boxTop, 559f, boxBottom, bgPaint)
             canvas.drawRect(36f, boxTop, 559f, boxBottom, borderPaint)
 
@@ -157,6 +182,11 @@ object InvoicePdfGenerator {
             textPaint.textSize = 9f
             textPaint.color = Color.parseColor("#475569")
             canvas.drawText("Phone: ${job.customerPhone.ifBlank { "N/A" }}", 48f, boxTop + 48f, textPaint)
+            if (clientCode.isNotBlank()) {
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                canvas.drawText("Client ID: $clientCode", 48f, boxTop + 61f, textPaint)
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+            }
 
             // Divider vertical line in Box
             canvas.drawLine(300f, boxTop + 10f, 300f, boxBottom - 10f, borderPaint)
@@ -170,12 +200,30 @@ object InvoicePdfGenerator {
             textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textPaint.textSize = 11f
             textPaint.color = Color.parseColor("#0F172A")
-            canvas.drawText(job.vehicleName.ifBlank { "Two Wheeler" }, 312f, boxTop + 34f, textPaint)
+            val descriptiveVehicle = listOf(job.vehicleMake, job.vehicleModel, job.vehicleVariant)
+                .filter { it.isNotBlank() }
+                .joinToString(" ")
+            canvas.drawText(
+                descriptiveVehicle.ifBlank { job.vehicleName.ifBlank { "Two Wheeler" } },
+                312f, boxTop + 34f, textPaint
+            )
 
             textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             textPaint.textSize = 9f
             textPaint.color = Color.parseColor("#475569")
             canvas.drawText("Reg Plate: ${job.vehiclePlate.ifBlank { "N/A" }}", 312f, boxTop + 48f, textPaint)
+
+            // Odometer and fuel print only when the owner has left vehicle details switched on
+            // and the job card actually carries them.
+            if (settings.showVehicleOnInvoice) {
+                val extras = buildList {
+                    if (job.vehicleKm.isNotBlank()) add("Odometer: ${job.vehicleKm} km")
+                    if (job.vehicleFuel.isNotBlank()) add("Fuel: ${job.vehicleFuel}%")
+                }
+                if (extras.isNotEmpty()) {
+                    canvas.drawText(extras.joinToString("   •   "), 312f, boxTop + 61f, textPaint)
+                }
+            }
 
             // Status Badge
             val statusColor = when (job.status.uppercase()) {
@@ -189,7 +237,8 @@ object InvoicePdfGenerator {
             canvas.drawText("[ ${job.status.uppercase()} ]", 480f, boxTop + 18f, textPaint)
 
             // 4. Itemized Service & Parts Table
-            var currentY = 195f
+            val tableTop = boxBottom + 20f
+            var currentY = tableTop
             val tableHeaderHeight = 22f
 
             // Table Header Background
@@ -234,8 +283,8 @@ object InvoicePdfGenerator {
             }
 
             // Table outer border
-            canvas.drawLine(36f, 195f, 36f, currentY, borderPaint)
-            canvas.drawLine(559f, 195f, 559f, currentY, borderPaint)
+            canvas.drawLine(36f, tableTop, 36f, currentY, borderPaint)
+            canvas.drawLine(559f, tableTop, 559f, currentY, borderPaint)
 
             currentY += 15f
 
@@ -256,8 +305,20 @@ object InvoicePdfGenerator {
             currentY += 14f
 
             if (job.taxes > 0) {
-                canvas.drawText("Taxes / GST:", summaryLeft, currentY, textPaint)
+                val ratePart = if (settings.gstEnabled) " (${String.format("%.0f", settings.gstRatePercent)}%)" else ""
+                canvas.drawText("Taxes / GST$ratePart:", summaryLeft, currentY, textPaint)
                 canvas.drawText("₹${String.format("%.0f", job.taxes)}", 495f, currentY, textPaint)
+                currentY += 14f
+            }
+
+            // The discount is a deduction with its own heading, not a silently reduced total.
+            if (job.discount > 0) {
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textPaint.color = Color.parseColor("#DC2626")
+                canvas.drawText("DISCOUNT:", summaryLeft, currentY, textPaint)
+                canvas.drawText("- ₹${String.format("%.0f", job.discount)}", 495f, currentY, textPaint)
+                textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+                textPaint.color = Color.parseColor("#475569")
                 currentY += 14f
             }
 
@@ -330,54 +391,21 @@ object InvoicePdfGenerator {
         }
     }
 
-    private fun parseJobItems(tasks: String, materials: String): List<PdfInvoiceItem> {
-        val result = mutableListOf<PdfInvoiceItem>()
-        var index = 1
-
-        if (tasks.isNotBlank()) {
-            tasks.split(",").forEach { task ->
-                val trimmed = task.trim()
-                if (trimmed.isNotEmpty()) {
-                    var price = 250.0
-                    val parts = trimmed.split(":")
-                    if (parts.size == 2) {
-                        price = parts[1].trim().toDoubleOrNull() ?: 250.0
-                    }
-                    val name = parts[0].trim()
-                    result.add(PdfInvoiceItem(index++, name, 1, price, price))
-                }
-            }
+    /**
+     * Reads the job's item lists with the *same* parser the on-screen invoice uses.
+     *
+     * There used to be a second parser here that understood a different format ("Part x2 @150"),
+     * so a bill edited on screen printed different line items and different prices than the ones
+     * the customer had just been shown. Sharing one parser is what keeps the paper and the screen
+     * agreeing; only the shaping into [PdfInvoiceItem] belongs to this file.
+     *
+     * An empty bill now prints as an empty table rather than inventing a ₹350 service that was
+     * never carried out.
+     */
+    private fun parseJobItems(tasks: String, materials: String): List<PdfInvoiceItem> =
+        com.example.ui.screens.parseInvoiceItems(tasks, materials).map { row ->
+            PdfInvoiceItem(row.id, row.description, row.qty, row.price, row.total)
         }
-
-        if (materials.isNotBlank()) {
-            materials.split(",").forEach { mat ->
-                val trimmed = mat.trim()
-                if (trimmed.isNotEmpty()) {
-                    var qty = 1
-                    var price = 150.0
-                    var name = trimmed
-
-                    if (trimmed.contains("x") && trimmed.contains("@")) {
-                        try {
-                            val namePart = trimmed.substringBefore("x").trim()
-                            val qtyPart = trimmed.substringAfter("x").substringBefore("@").trim()
-                            val pricePart = trimmed.substringAfter("@").trim()
-                            name = namePart
-                            qty = qtyPart.toIntOrNull() ?: 1
-                            price = pricePart.toDoubleOrNull() ?: 150.0
-                        } catch (_: Exception) {}
-                    }
-                    result.add(PdfInvoiceItem(index++, name, qty, price, qty * price))
-                }
-            }
-        }
-
-        if (result.isEmpty()) {
-            result.add(PdfInvoiceItem(1, "General Vehicle Service & Inspection", 1, 350.0, 350.0))
-        }
-
-        return result
-    }
 
     fun openPdf(context: Context, pdfFile: File) {
         try {

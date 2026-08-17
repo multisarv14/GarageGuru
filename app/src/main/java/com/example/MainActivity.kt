@@ -17,6 +17,7 @@ import com.example.ui.screens.MainAppScreen
 import com.example.ui.theme.MyApplicationTheme
 import com.example.data.api.GarageLogoStore
 import com.example.data.api.GarageSession
+import com.example.data.api.GarageSettings
 
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -25,6 +26,7 @@ class MainActivity : ComponentActivity() {
 
     // 1. Restore the workshop identity so Firestore writes are tagged from the first frame
     GarageSession.init(applicationContext)
+    GarageSettings.init(applicationContext)
     GarageLogoStore.init(applicationContext)
 
     // 2. Initialize Room Database & Repositories

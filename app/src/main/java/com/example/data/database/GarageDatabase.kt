@@ -9,6 +9,7 @@ import com.example.data.model.CustomerProfileEntity
 import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
+import com.example.data.model.StockIssueEntity
 import com.example.data.model.TeamMemberEntity
 import com.example.data.model.ServiceMembershipEntity
 
@@ -20,9 +21,10 @@ import com.example.data.model.ServiceMembershipEntity
         ServiceMembershipEntity::class,
         CustomerProfileEntity::class,
         ServiceAlertEntity::class,
-        TeamMemberEntity::class
+        TeamMemberEntity::class,
+        StockIssueEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class GarageDatabase : RoomDatabase() {

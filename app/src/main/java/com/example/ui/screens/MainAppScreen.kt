@@ -61,6 +61,8 @@ import com.example.ui.GarageViewModel
 import com.example.data.api.FirebaseAuthHelper
 import com.example.data.api.GarageLogoStore
 import com.example.data.api.GarageSession
+import com.example.data.api.GarageSettings
+import com.example.data.model.StockIssueEntity
 import kotlinx.coroutines.launch
 import com.example.ui.components.MechanicalGLogo
 import com.example.ui.i18n.LocalAppLanguage
@@ -103,6 +105,7 @@ fun MainAppScreen(
     val context = LocalContext.current
     val isOffline by viewModel.isOffline.collectAsState()
     val fcmToken by viewModel.fcmToken.collectAsState()
+    val isSyncing by viewModel.isSyncing.collectAsState()
 
     // Query states
     val jobList by viewModel.jobCards.collectAsState()
@@ -135,6 +138,12 @@ fun MainAppScreen(
     // App Language State (en = English, hi = Hindi, mr = Marathi)
     var selectedLanguage by remember { mutableStateOf(GarageSession.appLanguage) }
     var showLanguageDialog by remember { mutableStateOf(false) }
+
+    // Workshop configuration — drives the first-run wizard and the billing rules.
+    val garageSettings by GarageSettings.state.collectAsState()
+    // True once the cloud profile has been read. Until then the settings held here are only the
+    // on-device defaults, which would make a fully configured workshop look brand new.
+    var profileLoaded by remember { mutableStateOf(false) }
 
     val userInitials = remember(currentActiveUser.name) {
         val parts = currentActiveUser.name.trim().split(" ")
@@ -207,6 +216,7 @@ fun MainAppScreen(
                     phone?.takeIf { it.isNotBlank() }?.let { currentOwnerPhone = it }
                     logoScope.launch { GarageLogoStore.refreshFromCloud(GarageSession.logoUpdatedAt) }
                 }
+                profileLoaded = true
                 viewModel.syncWithCloud()
             }
         }
@@ -271,6 +281,8 @@ fun MainAppScreen(
                 InvoiceBreakdownPage(
                     viewModel = viewModel,
                     jobCard = selectedOrderForInvoice!!,
+                    inventory = inventoryList,
+                    customerProfiles = customerProfilesList,
                     onDismiss = { selectedOrderForInvoice = null },
                     onSavePdf = { job ->
                         viewModel.saveInvoicePdf(job, context)
@@ -509,6 +521,17 @@ fun MainAppScreen(
                     },
                     onRemoveTeamMember = { id -> viewModel.deleteTeamMember(id) },
                     onDismiss = { showTeamManagementSheet = false }
+                )
+            }
+
+            // --- First-run setup, shown to the owner before anything else ---
+            // Held back until the cloud pull has finished, so a returning owner restoring on a
+            // new device is not asked to configure a workshop that is already configured.
+            if (profileLoaded && !isSyncing && !garageSettings.setupCompleted && currentActiveUser.isOwner) {
+                FirstTimeSetupWizard(
+                    garageName = currentGarageName,
+                    ownerName = currentOwnerName,
+                    onFinish = { /* GarageSettings.setupCompleted closes this */ }
                 )
             }
 
@@ -1702,6 +1725,343 @@ fun QuickActionIconCard(
     }
 }
 
+/**
+ * The wizard a new workshop owner is walked through the first time they reach the dashboard.
+ *
+ * It asks only for the things the app cannot work out for itself and would otherwise print wrong
+ * or block on later: the address that heads every invoice, whether GST is charged at all and at
+ * what rate, the GSTIN, and whether stock shortages should stop an item being billed. It runs
+ * once — [GarageSettings.setupCompleted] is set at the end, and the same answers are editable
+ * afterwards from the profile screen, so nothing here is a one-shot decision.
+ *
+ * Only the owner sees it; staff roles have no business setting a workshop's tax position.
+ */
+@Composable
+fun FirstTimeSetupWizard(
+    garageName: String,
+    ownerName: String,
+    onFinish: () -> Unit
+) {
+    val context = LocalContext.current
+    val settings by GarageSettings.state.collectAsState()
+
+    var step by remember { mutableIntStateOf(1) }
+    val totalSteps = 3
+
+    var address by remember { mutableStateOf(settings.address) }
+    var gstEnabled by remember { mutableStateOf(settings.gstEnabled) }
+    var gstin by remember { mutableStateOf(settings.gstin) }
+    var gstRate by remember { mutableStateOf(String.format("%.0f", settings.gstRatePercent)) }
+    var stockValidation by remember { mutableStateOf(settings.stockValidationEnabled) }
+    var showVehicle by remember { mutableStateOf(settings.showVehicleOnInvoice) }
+
+    fun commit(markComplete: Boolean) {
+        GarageSettings.update(
+            address = address.trim(),
+            gstin = gstin.trim(),
+            gstEnabled = gstEnabled,
+            gstRatePercent = (gstRate.toDoubleOrNull() ?: 18.0).coerceIn(0.0, 100.0),
+            stockValidationEnabled = stockValidation,
+            showVehicleOnInvoice = showVehicle,
+            setupCompleted = markComplete
+        )
+    }
+
+    Dialog(
+        onDismissRequest = { /* deliberate: finished or skipped, never dismissed by accident */ },
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = false, dismissOnClickOutside = false)
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .fillMaxHeight(0.82f)
+                .clip(RoundedCornerShape(20.dp)),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                // Header
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(DeepIndigo)
+                        .padding(horizontal = 18.dp, vertical = 16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        MechanicalGLogo(modifier = Modifier.size(26.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "Welcome, ${ownerName.ifBlank { "Owner" }}",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 16.sp,
+                            color = Color.White
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        "Set up ${garageName.ifBlank { "your workshop" }} • Step $step of $totalSteps",
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = 0.85f)
+                    )
+                }
+
+                // Progress
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(Color(0xFFE5E7EB))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(step.toFloat() / totalSteps)
+                            .fillMaxHeight()
+                            .background(DeepIndigo)
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .background(Color(0xFFF9FAFB))
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    when (step) {
+                        1 -> {
+                            Text(
+                                "Where is your garage?",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF0F172A)
+                            )
+                            Text(
+                                "This address is printed at the top of every invoice and estimate you hand a customer.",
+                                fontSize = 12.sp,
+                                color = Color(0xFF64748B)
+                            )
+                            OutlinedTextField(
+                                value = address,
+                                onValueChange = { address = it },
+                                label = { Text("Garage Address", fontSize = 12.sp) },
+                                placeholder = { Text("Shop no, street, area, city, PIN", fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                                shape = RoundedCornerShape(10.dp),
+                                minLines = 3,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(
+                                "Registered with ${GarageSettings.APP_ADMIN_EMAIL}",
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                            if (settings.clientId.isNotBlank()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFFEEF2FF))
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text("YOUR CLIENT ID", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6366F1))
+                                        Text(
+                                            settings.clientId,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color(0xFF312E81),
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Text(
+                                            "Quote this when you contact support. It also prints on your invoices.",
+                                            fontSize = 10.sp,
+                                            color = Color(0xFF64748B)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        2 -> {
+                            Text(
+                                "Do you charge GST?",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF0F172A)
+                            )
+                            Text(
+                                "Switch this off if your workshop is not GST registered — invoices will then carry no tax line at all.",
+                                fontSize = 12.sp,
+                                color = Color(0xFF64748B)
+                            )
+                            SettingToggleRow(
+                                icon = Icons.Default.ReceiptLong,
+                                title = "Charge GST on bills",
+                                subtitle = if (gstEnabled) "A tax line is added to every invoice" else "No tax is added",
+                                checked = gstEnabled,
+                                onCheckedChange = { gstEnabled = it }
+                            )
+                            if (gstEnabled) {
+                                OutlinedTextField(
+                                    value = gstin,
+                                    onValueChange = { gstin = it.uppercase() },
+                                    label = { Text("GSTIN", fontSize = 12.sp) },
+                                    placeholder = { Text("27ABCDE1234F1Z5", fontSize = 12.sp) },
+                                    singleLine = true,
+                                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                OutlinedTextField(
+                                    value = gstRate,
+                                    onValueChange = { gstRate = it },
+                                    label = { Text("GST Rate (%)", fontSize = 12.sp) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+
+                        else -> {
+                            Text(
+                                "How should stock and invoices behave?",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF0F172A)
+                            )
+                            SettingToggleRow(
+                                icon = Icons.Default.Inventory2,
+                                title = "Stock availability validation",
+                                subtitle = if (stockValidation)
+                                    "Block billing an item the stock cannot cover"
+                                else
+                                    "Allow billing even when stock has run out",
+                                checked = stockValidation,
+                                onCheckedChange = { stockValidation = it }
+                            )
+                            HorizontalDivider(color = Color(0xFFE2E8F0))
+                            SettingToggleRow(
+                                icon = Icons.Default.DirectionsCar,
+                                title = "Vehicle details on invoice",
+                                subtitle = if (showVehicle)
+                                    "Print make, model, odometer and fuel"
+                                else
+                                    "Print the registration plate only",
+                                checked = showVehicle,
+                                onCheckedChange = { showVehicle = it }
+                            )
+                            HorizontalDivider(color = Color(0xFFE2E8F0))
+                            Text(
+                                "Everything here can be changed later under Settings → Business & Billing.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8)
+                            )
+                        }
+                    }
+                }
+
+                Divider(color = Color(0xFFE5E7EB), thickness = 1.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (step > 1) {
+                        OutlinedButton(
+                            onClick = { step -= 1 },
+                            border = BorderStroke(1.dp, DeepIndigo),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = DeepIndigo),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.height(38.dp)
+                        ) {
+                            Text("Back", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        // Skipping still marks setup done, so the wizard does not reappear on
+                        // every launch and nag an owner who wants to get straight to work.
+                        TextButton(
+                            onClick = {
+                                commit(markComplete = true)
+                                onFinish()
+                            },
+                            colors = ButtonDefaults.textButtonColors(contentColor = Color.Gray),
+                            modifier = Modifier.height(38.dp)
+                        ) {
+                            Text("Skip for now", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            if (step < totalSteps) {
+                                commit(markComplete = false)
+                                step += 1
+                            } else {
+                                commit(markComplete = true)
+                                Toast.makeText(context, "Workshop setup saved", Toast.LENGTH_SHORT).show()
+                                onFinish()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = DeepIndigo),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(38.dp)
+                    ) {
+                        Text(
+                            if (step < totalSteps) "Continue" else "Finish Setup",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Icon, title, explanation and a switch — the shape every workshop-level preference takes. */
+@Composable
+private fun SettingToggleRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (checked) Color(0xFF4F46E5) else Color(0xFF94A3B8),
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A))
+            Text(subtitle, fontSize = 11.sp, color = Color(0xFF64748B))
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = Color(0xFF4F46E5)
+            )
+        )
+    }
+}
+
 @Composable
 fun AccountSettingsView(
     onBackClick: () -> Unit,
@@ -1719,9 +2079,19 @@ fun AccountSettingsView(
     onOpenTeamManagement: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val settings by GarageSettings.state.collectAsState()
     var isEditingGarageName by remember { mutableStateOf(false) }
     var editedGarageName by remember(garageName) { mutableStateOf(garageName) }
     val hasLogo = garageLogoBytes != null && garageLogoBytes.isNotEmpty()
+
+    // Address and GSTIN are edited in place; the drafts live here so a half-typed value is not
+    // written to the cloud on every keystroke.
+    var addressDraft by remember(settings.address) { mutableStateOf(settings.address) }
+    var gstinDraft by remember(settings.gstin) { mutableStateOf(settings.gstin) }
+    var gstRateDraft by remember(settings.gstRatePercent) {
+        mutableStateOf(String.format("%.0f", settings.gstRatePercent))
+    }
 
     val logoLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -1949,6 +2319,42 @@ fun AccountSettingsView(
                 Text(ownerName, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp, color = Color(0xFF0F172A))
                 Text(garageName, fontSize = 13.sp, color = Color(0xFF64748B), fontWeight = FontWeight.Medium)
                 Text(ownerPhone, fontSize = 12.sp, color = Color(0xFF059669), fontWeight = FontWeight.Bold)
+
+                // The workshop's own Client ID, tappable to copy because it is what support asks
+                // for and what goes on the printed invoice.
+                if (settings.clientId.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFFEEF2FF))
+                            .border(1.dp, Color(0xFFC7D2FE), RoundedCornerShape(8.dp))
+                            .clickable {
+                                clipboard.setText(AnnotatedString(settings.clientId))
+                                Toast.makeText(context, "Client ID ${settings.clientId} copied", Toast.LENGTH_SHORT).show()
+                            }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("CLIENT ID", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF6366F1))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            settings.clientId,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF312E81),
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy Client ID",
+                            tint = Color(0xFF6366F1),
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
                     color = Color(0xFF10B981).copy(alpha = 0.12f),
@@ -1976,6 +2382,153 @@ fun AccountSettingsView(
                     Icon(Icons.Default.ExitToApp, contentDescription = "Log Out", tint = Color(0xFFEF4444), modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(t("action.logout"), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+        }
+
+        // --- Business, Billing & Stock rules ---
+        Text("BUSINESS & BILLING", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8), modifier = Modifier.padding(start = 4.dp))
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, Color(0xFFE2E8F0))
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Garage address — printed at the top of every invoice.
+                OutlinedTextField(
+                    value = addressDraft,
+                    onValueChange = { addressDraft = it },
+                    label = { Text("Garage Address", fontSize = 12.sp) },
+                    placeholder = { Text("Shop no, street, area, city, PIN", fontSize = 12.sp) },
+                    leadingIcon = {
+                        Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp))
+                    },
+                    trailingIcon = {
+                        if (addressDraft != settings.address) {
+                            IconButton(onClick = {
+                                GarageSettings.update(address = addressDraft.trim())
+                                Toast.makeText(context, "Garage address saved", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(Icons.Default.Check, contentDescription = "Save address", tint = Color(0xFF059669))
+                            }
+                        }
+                    },
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(10.dp),
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = gstinDraft,
+                    onValueChange = { gstinDraft = it.uppercase() },
+                    label = { Text("GSTIN", fontSize = 12.sp) },
+                    placeholder = { Text("27ABCDE1234F1Z5", fontSize = 12.sp) },
+                    leadingIcon = {
+                        Icon(Icons.Default.Badge, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp))
+                    },
+                    trailingIcon = {
+                        if (gstinDraft != settings.gstin) {
+                            IconButton(onClick = {
+                                GarageSettings.update(gstin = gstinDraft.trim())
+                                Toast.makeText(context, "GSTIN saved", Toast.LENGTH_SHORT).show()
+                            }) {
+                                Icon(Icons.Default.Check, contentDescription = "Save GSTIN", tint = Color(0xFF059669))
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                HorizontalDivider(color = Color(0xFFF1F5F9))
+
+                // GST on/off. Switching it off drops the tax line from new invoice totals
+                // entirely, for workshops that are not registered.
+                SettingToggleRow(
+                    icon = Icons.Default.ReceiptLong,
+                    title = "Charge GST on bills",
+                    subtitle = if (settings.gstEnabled)
+                        "Invoices add GST at ${String.format("%.0f", settings.gstRatePercent)}%"
+                    else
+                        "No tax line is added to invoices",
+                    checked = settings.gstEnabled,
+                    onCheckedChange = { GarageSettings.update(gstEnabled = it) }
+                )
+
+                if (settings.gstEnabled) {
+                    OutlinedTextField(
+                        value = gstRateDraft,
+                        onValueChange = { gstRateDraft = it },
+                        label = { Text("GST Rate (%)", fontSize = 12.sp) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        trailingIcon = {
+                            val parsed = gstRateDraft.toDoubleOrNull()
+                            if (parsed != null && parsed != settings.gstRatePercent) {
+                                IconButton(onClick = {
+                                    GarageSettings.update(gstRatePercent = parsed.coerceIn(0.0, 100.0))
+                                    Toast.makeText(context, "GST rate updated", Toast.LENGTH_SHORT).show()
+                                }) {
+                                    Icon(Icons.Default.Check, contentDescription = "Save rate", tint = Color(0xFF059669))
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                HorizontalDivider(color = Color(0xFFF1F5F9))
+
+                SettingToggleRow(
+                    icon = Icons.Default.DirectionsCar,
+                    title = "Vehicle details on invoice",
+                    subtitle = if (settings.showVehicleOnInvoice)
+                        "Make, model, odometer and fuel are printed"
+                    else
+                        "Only the registration plate is printed",
+                    checked = settings.showVehicleOnInvoice,
+                    onCheckedChange = { GarageSettings.update(showVehicleOnInvoice = it) }
+                )
+
+                HorizontalDivider(color = Color(0xFFF1F5F9))
+
+                SettingToggleRow(
+                    icon = Icons.Default.Inventory2,
+                    title = "Stock availability validation",
+                    subtitle = if (settings.stockValidationEnabled)
+                        "An item cannot be billed unless the stock covers it"
+                    else
+                        "Items can be billed even when stock has run out",
+                    checked = settings.stockValidationEnabled,
+                    onCheckedChange = { GarageSettings.update(stockValidationEnabled = it) }
+                )
+
+                HorizontalDivider(color = Color(0xFFF1F5F9))
+
+                // Who supports this installation. Registered against every new client account.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.SupportAgent, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("App Admin", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A))
+                        Text(GarageSettings.APP_ADMIN_EMAIL, fontSize = 12.sp, color = Color(0xFF64748B))
+                    }
+                    IconButton(onClick = {
+                        clipboard.setText(AnnotatedString(GarageSettings.APP_ADMIN_EMAIL))
+                        Toast.makeText(context, "Admin email copied", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy admin email", tint = Color(0xFF4F46E5), modifier = Modifier.size(16.dp))
+                    }
                 }
             }
         }
@@ -2209,7 +2762,14 @@ fun AccountSettingsView(
                     Icon(Icons.Default.Info, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(t("set.version"), fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFF0F172A), modifier = Modifier.weight(1f))
-                    Text("v3.2.0-clean", fontSize = 12.sp, color = Color(0xFF64748B))
+                    // Read from the build rather than typed in: the hardcoded string said
+                    // "v3.2.0-clean" while the app shipped as 2.3, so a support call could never
+                    // establish which build a workshop was actually running.
+                    Text(
+                        "v${com.example.BuildConfig.VERSION_NAME} (${com.example.BuildConfig.VERSION_CODE})",
+                        fontSize = 12.sp,
+                        color = Color(0xFF64748B)
+                    )
                 }
             }
         }
@@ -2526,6 +3086,71 @@ fun MoreOptionsDialog(
     }
 }
 
+/**
+ * One field of the auth form.
+ *
+ * Every field on that screen wanted the same colours, shape, text size and 11sp label, and the
+ * sign-up form has eight of them — spelling each one out in full was what made the form tall
+ * enough to run off a small phone. Pulling the shared parts here keeps the form itself short
+ * enough to read as a single block.
+ */
+@Composable
+private fun AuthField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    leading: ImageVector? = null,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    isPassword: Boolean = false,
+    passwordVisible: Boolean = false,
+    onTogglePassword: (() -> Unit)? = null,
+    isError: Boolean = false,
+    supportingText: String? = null
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label, fontSize = 11.sp) },
+        leadingIcon = leading?.let {
+            {
+                Icon(it, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(16.dp))
+            }
+        },
+        trailingIcon = onTogglePassword?.let {
+            {
+                IconButton(onClick = it, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (passwordVisible) "Hide password" else "Show password",
+                        tint = Color(0xFF64748B),
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        },
+        visualTransformation = if (!isPassword || passwordVisible)
+            androidx.compose.ui.text.input.VisualTransformation.None
+        else
+            androidx.compose.ui.text.input.PasswordVisualTransformation(),
+        isError = isError,
+        supportingText = supportingText?.let {
+            { Text(it, fontSize = 10.sp, color = Color(0xFFEF4444)) }
+        },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = Color(0xFF4F46E5),
+            focusedLabelColor = Color(0xFF4F46E5),
+            unfocusedBorderColor = Color(0xFFCBD5E1),
+            cursorColor = Color(0xFF4F46E5)
+        ),
+        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+        shape = RoundedCornerShape(10.dp),
+        modifier = modifier
+    )
+}
+
 // --- First Time User Mobile Login & Garage Sign Up Screen ---
 @Composable
 fun GarageAuthScreen(
@@ -2575,15 +3200,6 @@ fun GarageAuthScreen(
         }
     }
 
-    val fieldColors = OutlinedTextFieldDefaults.colors(
-        focusedBorderColor = Color(0xFF4F46E5),
-        focusedLabelColor = Color(0xFF4F46E5),
-        unfocusedBorderColor = Color(0xFFCBD5E1),
-        cursorColor = Color(0xFF4F46E5)
-    )
-    val fieldShape = RoundedCornerShape(10.dp)
-    val fieldText = androidx.compose.ui.text.TextStyle(fontSize = 13.sp)
-
     fun label(en: String, hi: String, mr: String) = when (selectedLanguage) {
         "hi" -> hi; "mr" -> mr; else -> en
     }
@@ -2618,9 +3234,9 @@ fun GarageAuthScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     // Brand row + language pill
                     Row(
@@ -2708,43 +3324,24 @@ fun GarageAuthScreen(
                     }
 
                     if (!isSignUpTab) {
-                        OutlinedTextField(
+                        AuthField(
                             value = loginPhone,
                             onValueChange = { loginPhone = it },
-                            label = { Text(label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
+                            label = label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"),
+                            leading = Icons.Default.Phone,
+                            keyboardType = KeyboardType.Phone,
+                            modifier = Modifier.fillMaxWidth()
                         )
 
-                        OutlinedTextField(
+                        AuthField(
                             value = loginPassword,
                             onValueChange = { loginPassword = it },
-                            label = { Text(label("Password", "पासवर्ड", "पासवर्ड"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            trailingIcon = {
-                                IconButton(onClick = { showLoginPassword = !showLoginPassword }) {
-                                    Icon(
-                                        imageVector = if (showLoginPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = if (showLoginPassword) "Hide password" else "Show password",
-                                        tint = Color(0xFF64748B),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            },
-                            visualTransformation = if (showLoginPassword)
-                                androidx.compose.ui.text.input.VisualTransformation.None
-                            else
-                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
+                            label = label("Password", "पासवर्ड", "पासवर्ड"),
+                            leading = Icons.Default.Lock,
+                            isPassword = true,
+                            passwordVisible = showLoginPassword,
+                            onTogglePassword = { showLoginPassword = !showLoginPassword },
+                            modifier = Modifier.fillMaxWidth()
                         )
 
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -2796,119 +3393,111 @@ fun GarageAuthScreen(
                             Text(label("SIGN IN", "साइन इन करें", "साइन इन करा"), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                     } else {
-                        OutlinedTextField(
+                        // Paired side by side wherever a field is short: the sign-up form used to
+                        // run to eight full-width rows, which no longer fit on a small phone once
+                        // the keyboard was up.
+                        AuthField(
                             value = signUpGarageName,
                             onValueChange = { signUpGarageName = it },
-                            label = { Text(label("Garage / Workshop Name", "गैराज / वर्कशॉप का नाम", "गॅरेज / वर्कशॉपचे नाव"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Store, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
-                        )
-
-                        OutlinedTextField(
-                            value = signUpOwnerName,
-                            onValueChange = { signUpOwnerName = it },
-                            label = { Text(label("Owner / Admin Name", "मालिक / एडमिन का नाम", "मालक / ॲडमिनचे नाव"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
+                            label = label("Garage / Workshop Name", "गैराज / वर्कशॉप का नाम", "गॅरेज / वर्कशॉपचे नाव"),
+                            leading = Icons.Default.Store,
+                            modifier = Modifier.fillMaxWidth()
                         )
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            OutlinedTextField(
-                                value = signUpPhone,
-                                onValueChange = { signUpPhone = it },
-                                label = { Text(label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"), fontSize = 12.sp) },
-                                leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                                modifier = Modifier.weight(1.3f),
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                                colors = fieldColors,
-                                textStyle = fieldText,
-                                shape = fieldShape
+                            AuthField(
+                                value = signUpOwnerName,
+                                onValueChange = { signUpOwnerName = it },
+                                label = label("Owner Name", "मालिक का नाम", "मालकाचे नाव"),
+                                leading = Icons.Default.Person,
+                                modifier = Modifier.weight(1.3f)
                             )
-                            OutlinedTextField(
+                            AuthField(
                                 value = signUpCity,
                                 onValueChange = { signUpCity = it },
-                                label = { Text(label("City", "शहर", "शहर"), fontSize = 12.sp) },
-                                modifier = Modifier.weight(1f),
-                                singleLine = true,
-                                colors = fieldColors,
-                                textStyle = fieldText,
-                                shape = fieldShape
+                                label = label("City", "शहर", "शहर"),
+                                modifier = Modifier.weight(1f)
                             )
                         }
 
                         // A real address is what makes password recovery possible at all — the
                         // phone identity maps to a synthetic domain that can never receive mail.
-                        OutlinedTextField(
-                            value = signUpEmail,
-                            onValueChange = { signUpEmail = it },
-                            label = { Text(label("Email ID", "ईमेल आईडी", "ईमेल आयडी"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Email, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
-                        )
-
-                        OutlinedTextField(
-                            value = signUpPassword,
-                            onValueChange = { signUpPassword = it },
-                            label = { Text(label("Create Password", "पासवर्ड बनाएं", "पासवर्ड तयार करा"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            trailingIcon = {
-                                IconButton(onClick = { showSignUpPassword = !showSignUpPassword }) {
-                                    Icon(
-                                        imageVector = if (showSignUpPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                        contentDescription = if (showSignUpPassword) "Hide password" else "Show password",
-                                        tint = Color(0xFF64748B),
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            },
-                            visualTransformation = if (showSignUpPassword)
-                                androidx.compose.ui.text.input.VisualTransformation.None
-                            else
-                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
-                        )
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            AuthField(
+                                value = signUpPhone,
+                                onValueChange = { signUpPhone = it },
+                                label = label("Mobile Number", "मोबाइल नंबर", "मोबाईल नंबर"),
+                                leading = Icons.Default.Phone,
+                                keyboardType = KeyboardType.Phone,
+                                modifier = Modifier.weight(1f)
+                            )
+                            AuthField(
+                                value = signUpEmail,
+                                onValueChange = { signUpEmail = it },
+                                label = label("Email ID", "ईमेल आईडी", "ईमेल आयडी"),
+                                keyboardType = KeyboardType.Email,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
                         val mismatch = signUpConfirmPassword.isNotEmpty() && signUpConfirmPassword != signUpPassword
-                        OutlinedTextField(
-                            value = signUpConfirmPassword,
-                            onValueChange = { signUpConfirmPassword = it },
-                            label = { Text(label("Confirm Password", "पासवर्ड की पुष्टि करें", "पासवर्डची खात्री करा"), fontSize = 12.sp) },
-                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = Color(0xFF4F46E5), modifier = Modifier.size(18.dp)) },
-                            visualTransformation = if (showSignUpPassword)
-                                androidx.compose.ui.text.input.VisualTransformation.None
-                            else
-                                androidx.compose.ui.text.input.PasswordVisualTransformation(),
-                            isError = mismatch,
-                            supportingText = if (mismatch) {
-                                { Text(label("Passwords do not match", "पासवर्ड मेल नहीं खाते", "पासवर्ड जुळत नाहीत"), fontSize = 11.sp, color = Color(0xFFEF4444)) }
-                            } else null,
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            colors = fieldColors,
-                            textStyle = fieldText,
-                            shape = fieldShape
-                        )
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            AuthField(
+                                value = signUpPassword,
+                                onValueChange = { signUpPassword = it },
+                                label = label("Password", "पासवर्ड", "पासवर्ड"),
+                                isPassword = true,
+                                passwordVisible = showSignUpPassword,
+                                onTogglePassword = { showSignUpPassword = !showSignUpPassword },
+                                modifier = Modifier.weight(1f)
+                            )
+                            AuthField(
+                                value = signUpConfirmPassword,
+                                onValueChange = { signUpConfirmPassword = it },
+                                label = label("Confirm", "पुष्टि करें", "खात्री करा"),
+                                isPassword = true,
+                                passwordVisible = showSignUpPassword,
+                                isError = mismatch,
+                                supportingText = if (mismatch)
+                                    label("Passwords do not match", "पासवर्ड मेल नहीं खाते", "पासवर्ड जुळत नाहीत")
+                                else null,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        // The workshop is registered with the app operator, so say who that is
+                        // before the owner commits rather than leaving it to be discovered later.
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFFF1F5F9))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.SupportAgent,
+                                contentDescription = null,
+                                tint = Color(0xFF64748B),
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = label("Support", "सहायता", "मदत") + ": ${GarageSettings.APP_ADMIN_EMAIL}",
+                                fontSize = 10.sp,
+                                color = Color(0xFF64748B),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
 
                         Button(
                             onClick = {
@@ -4613,6 +5202,200 @@ fun LedgerItemRow(cash: CashItemEntity, onDelete: () -> Unit) {
 // ==========================================
 // VIEW 5: SYSTEM COORDINATOR (Stock check & FCM notifications, Migration backup import exports)
 // ==========================================
+/** One line of the stock issue log, with the way to undo it. */
+@Composable
+fun StockIssueRow(issue: StockIssueEntity, onRevert: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(issue.itemName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF0F172A))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Surface(color = Color(0xFFEEF2FF), shape = RoundedCornerShape(6.dp)) {
+                        Text(
+                            "− ${issue.quantity}",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF4F46E5)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = buildString {
+                        append(SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()).format(Date(issue.timestamp)))
+                        if (issue.issuedTo.isNotBlank()) append("  •  to ${issue.issuedTo}")
+                        if (issue.jobCardId > 0) append("  •  Job #${issue.jobCardId}")
+                    },
+                    fontSize = 11.sp,
+                    color = Color(0xFF64748B)
+                )
+                if (issue.reason.isNotBlank()) {
+                    Text(issue.reason, fontSize = 11.sp, color = Color(0xFF94A3B8), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    "₹${String.format("%.0f", issue.totalValue)}",
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 13.sp,
+                    color = Color(0xFF0F172A)
+                )
+                TextButton(
+                    onClick = onRevert,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    modifier = Modifier.height(26.dp)
+                ) {
+                    Icon(Icons.Default.Undo, contentDescription = null, tint = Color(0xFF64748B), modifier = Modifier.size(12.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text("Return", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Takes stock out of the store room against a person and a reason.
+ *
+ * The quantity is capped at what is actually on the shelf, so an issue can never drive a count
+ * negative — a shortage has to be corrected by editing the item, where it is visible.
+ */
+@Composable
+fun IssueStockDialog(
+    item: InventoryItemEntity,
+    onDismiss: () -> Unit,
+    onIssue: (quantity: Int, issuedTo: String, reason: String) -> Unit
+) {
+    var qtyText by remember { mutableStateOf("1") }
+    var issuedTo by remember { mutableStateOf("") }
+    var reason by remember { mutableStateOf("") }
+
+    val qty = qtyText.toIntOrNull() ?: 0
+    val tooMany = qty > item.quantity
+    val valid = qty > 0 && !tooMany
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Issue Stock", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Color(0xFF0F172A))
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF64748B), modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                Divider(color = Color(0xFFE2E8F0))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF8FAFC))
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(item.name, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF0F172A))
+                        Text("${item.stockType} • ₹${String.format("%.0f", item.unitPrice)} each", fontSize = 11.sp, color = Color(0xFF64748B))
+                    }
+                    Text(
+                        "In stock: ${item.quantity}",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        color = Color(0xFF10B981)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = qtyText,
+                    onValueChange = { qtyText = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("Quantity to issue", fontSize = 12.sp) },
+                    isError = tooMany,
+                    supportingText = if (tooMany) {
+                        { Text("Only ${item.quantity} in stock", fontSize = 11.sp, color = Color(0xFFEF4444)) }
+                    } else null,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = issuedTo,
+                    onValueChange = { issuedTo = it },
+                    label = { Text("Issued to", fontSize = 12.sp) },
+                    placeholder = { Text("Mechanic or customer name", fontSize = 12.sp) },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    label = { Text("Reason / Reference", fontSize = 12.sp) },
+                    placeholder = { Text("Job card, counter sale, workshop use", fontSize = 12.sp) },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Value issued", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                    Text(
+                        "₹${String.format("%.2f", qty * item.unitPrice)}",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF5B4DFF)
+                    )
+                }
+
+                Button(
+                    onClick = { onIssue(qty, issuedTo.trim(), reason.trim()) },
+                    enabled = valid,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5B4DFF)),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Issue Stock", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun SystemCoordinatorView(
     viewModel: GarageViewModel,
@@ -4623,8 +5406,10 @@ fun SystemCoordinatorView(
 ) {
     val context = LocalContext.current
     var selectedStockTab by remember { mutableStateOf("ALL") }
+    val stockIssues by viewModel.stockIssues.collectAsState()
 
     var showAddStockDialog by remember { mutableStateOf(false) }
+    var issuingItem by remember { mutableStateOf<InventoryItemEntity?>(null) }
     var editingItem by remember { mutableStateOf<InventoryItemEntity?>(null) }
     var inputPartName by remember { mutableStateOf("") }
     var inputQty by remember { mutableStateOf("") }
@@ -4704,10 +5489,11 @@ fun SystemCoordinatorView(
                 }
             }
 
-            // Filter Tabs Row
+            // Filter Tabs Row — scrolls sideways so every filter stays reachable on a narrow phone
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(bottom = 6.dp),
                 horizontalArrangement = Arrangement.Start,
                 verticalAlignment = Alignment.CenterVertically
@@ -4717,7 +5503,7 @@ fun SystemCoordinatorView(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    listOf("ALL", "SERVICE", "SPARE", "LUBE", "LOW STOCK").forEach { tab ->
+                    listOf("ALL", "SERVICE", "SPARE", "LUBE", "LOW STOCK", "ISSUES").forEach { tab ->
                         val isActive = selectedStockTab == tab
                         val bg = if (isActive) Color(0xFF5B4DFF) else Color(0xFFE2E8F0)
                         val tc = if (isActive) Color.White else Color(0xFF475569)
@@ -4725,6 +5511,7 @@ fun SystemCoordinatorView(
                         val count = when (tab) {
                             "ALL" -> inventory.size
                             "LOW STOCK" -> inventory.count { it.quantity <= it.minStockAlert }
+                            "ISSUES" -> stockIssues.size
                             else -> inventory.count { it.stockType.equals(tab, ignoreCase = true) }
                         }
 
@@ -4773,7 +5560,47 @@ fun SystemCoordinatorView(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 90.dp)
             ) {
-                if (filteredInventory.isEmpty()) {
+                if (selectedStockTab == "ISSUES") {
+                    // The withdrawal log: what left the store room, when, and for whom.
+                    if (stockIssues.isEmpty()) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                colors = CardDefaults.cardColors(containerColor = Color.White),
+                                border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(24.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Icon(Icons.Default.Outbound, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(36.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        "No stock issued yet. Use Issue on any item to take it out of the store room.",
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF64748B),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        items(stockIssues) { issue ->
+                            StockIssueRow(
+                                issue = issue,
+                                onRevert = {
+                                    viewModel.revertStockIssue(issue)
+                                    Toast.makeText(
+                                        context,
+                                        "Returned ${issue.quantity} × ${issue.itemName} to stock",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            )
+                        }
+                    }
+                } else if (filteredInventory.isEmpty()) {
                     item {
                         Card(
                             modifier = Modifier
@@ -4900,37 +5727,34 @@ fun SystemCoordinatorView(
                                             )
                                         }
 
-                                        // Quick Action Controls (+ / - / Edit / Delete)
+                                        // Quick Action Controls (Issue / Edit / Delete). The bare
+                                        // +/- steppers are gone: a count that changes with no
+                                        // record of why is what "Issue" exists to replace.
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(2.dp)
                                         ) {
-                                            // Decrease Quantity (-1)
-                                            IconButton(
-                                                onClick = {
-                                                    val newQty = (part.quantity - 1).coerceAtLeast(0)
-                                                    viewModel.addInventoryItem(part.copy(quantity = newQty))
-                                                },
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .background(Color(0xFFF1F5F9), shape = RoundedCornerShape(6.dp))
+                                            // Issue stock out of the store room
+                                            TextButton(
+                                                onClick = { issuingItem = part },
+                                                enabled = part.quantity > 0,
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(28.dp)
                                             ) {
-                                                Text("-", fontWeight = FontWeight.Black, fontSize = 16.sp, color = Color(0xFF475569))
+                                                Icon(
+                                                    Icons.Default.Outbound,
+                                                    contentDescription = "Issue Stock",
+                                                    tint = if (part.quantity > 0) Color(0xFF5B4DFF) else Color(0xFFCBD5E1),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(3.dp))
+                                                Text(
+                                                    "Issue",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (part.quantity > 0) Color(0xFF5B4DFF) else Color(0xFFCBD5E1)
+                                                )
                                             }
-
-                                            // Increase Quantity (+1)
-                                            IconButton(
-                                                onClick = {
-                                                    viewModel.addInventoryItem(part.copy(quantity = part.quantity + 1))
-                                                },
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .background(Color(0xFFEEF2FF), shape = RoundedCornerShape(6.dp))
-                                            ) {
-                                                Text("+", fontWeight = FontWeight.Black, fontSize = 15.sp, color = Color(0xFF5B4DFF))
-                                            }
-
-                                            Spacer(modifier = Modifier.width(4.dp))
 
                                             // Edit Item
                                             IconButton(
@@ -4969,6 +5793,22 @@ fun SystemCoordinatorView(
 
     }
 
+    issuingItem?.let { item ->
+        IssueStockDialog(
+            item = item,
+            onDismiss = { issuingItem = null },
+            onIssue = { qty, issuedTo, reason ->
+                viewModel.issueStock(item, qty, issuedTo, reason)
+                issuingItem = null
+                Toast.makeText(
+                    context,
+                    "Issued $qty × ${item.name} • stock now ${(item.quantity - qty).coerceAtLeast(0)}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
+    }
+
     if (showAddStockDialog) {
         Dialog(onDismissRequest = { showAddStockDialog = false }) {
             Card(
@@ -5003,26 +5843,23 @@ fun SystemCoordinatorView(
 
                     Divider(color = Color(0xFFE2E8F0))
 
-                    SimpleFormDropdown(
-                        label = t("stock.type"),
-                        options = listOf("Service", "Spare", "Lube"),
-                        selectedOption = inputStockType,
-                        onOptionSelected = { inputStockType = it },
-                        modifier = Modifier.fillMaxWidth()
+                    // Five stacked full-width fields made this dialog taller than the phone once
+                    // the keyboard opened; the short numeric ones pair up instead.
+                    val stockFieldColors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = Color(0xFF1E293B),
+                        unfocusedTextColor = Color(0xFF1E293B),
+                        focusedBorderColor = Color(0xFF5B4DFF),
+                        unfocusedBorderColor = Color(0xFFE2E8F0)
                     )
 
                     OutlinedTextField(
                         value = inputPartName,
                         onValueChange = { inputPartName = it },
-                        label = { Text(t("stock.name")) },
-                        placeholder = { Text("e.g. Engine Oil 1L") },
+                        label = { Text(t("stock.name"), fontSize = 12.sp) },
+                        placeholder = { Text("e.g. Engine Oil 1L", fontSize = 12.sp) },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color(0xFF1E293B),
-                            unfocusedTextColor = Color(0xFF1E293B),
-                            focusedBorderColor = Color(0xFF5B4DFF),
-                            unfocusedBorderColor = Color(0xFFE2E8F0)
-                        ),
+                        colors = stockFieldColors,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
                         singleLine = true,
                         shape = RoundedCornerShape(8.dp)
                     )
@@ -5031,19 +5868,41 @@ fun SystemCoordinatorView(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        SimpleFormDropdown(
+                            label = t("stock.type"),
+                            options = listOf("Service", "Spare", "Lube"),
+                            selectedOption = inputStockType,
+                            onOptionSelected = { inputStockType = it },
+                            modifier = Modifier.weight(1.2f)
+                        )
+
+                        OutlinedTextField(
+                            value = inputMinAlert,
+                            onValueChange = { inputMinAlert = it },
+                            label = { Text(t("stock.alertLevel"), fontSize = 12.sp) },
+                            placeholder = { Text("3", fontSize = 12.sp) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f),
+                            colors = stockFieldColors,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            singleLine = true,
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                         OutlinedTextField(
                             value = inputQty,
                             onValueChange = { inputQty = it },
-                            label = { Text(t("stock.qty")) },
-                            placeholder = { Text("e.g. 10") },
+                            label = { Text(t("stock.qty"), fontSize = 12.sp) },
+                            placeholder = { Text("10", fontSize = 12.sp) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.weight(1f),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color(0xFF1E293B),
-                                unfocusedTextColor = Color(0xFF1E293B),
-                                focusedBorderColor = Color(0xFF5B4DFF),
-                                unfocusedBorderColor = Color(0xFFE2E8F0)
-                            ),
+                            colors = stockFieldColors,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp)
                         )
@@ -5051,39 +5910,16 @@ fun SystemCoordinatorView(
                         OutlinedTextField(
                             value = inputPrice,
                             onValueChange = { inputPrice = it },
-                            label = { Text(t("stock.unitPrice")) },
-                            placeholder = { Text("e.g. 450") },
+                            label = { Text(t("stock.unitPrice"), fontSize = 12.sp) },
+                            placeholder = { Text("450", fontSize = 12.sp) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier.weight(1f),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color(0xFF1E293B),
-                                unfocusedTextColor = Color(0xFF1E293B),
-                                focusedBorderColor = Color(0xFF5B4DFF),
-                                unfocusedBorderColor = Color(0xFFE2E8F0)
-                            ),
+                            colors = stockFieldColors,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp)
                         )
                     }
-
-                    OutlinedTextField(
-                        value = inputMinAlert,
-                        onValueChange = { inputMinAlert = it },
-                        label = { Text(t("stock.alertLevel")) },
-                        placeholder = { Text("e.g. 3") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color(0xFF1E293B),
-                            unfocusedTextColor = Color(0xFF1E293B),
-                            focusedBorderColor = Color(0xFF5B4DFF),
-                            unfocusedBorderColor = Color(0xFFE2E8F0)
-                        ),
-                        singleLine = true,
-                        shape = RoundedCornerShape(8.dp)
-                    )
-
-                    Spacer(modifier = Modifier.height(4.dp))
 
                     Button(
                         onClick = {
@@ -5220,10 +6056,11 @@ fun CreateJobCardSheet(
     initialJob: JobCardEntity? = null,
     onDismiss: () -> Unit,
 ) {
-    // Current Wizard Step: 1 -> Vehicle, Customer, Symptoms; 2 -> Work done, Parts Used, and Billing Rates (Saves directly)
-    var step by remember { mutableIntStateOf(1) }
+    // A job card is opened from the vehicle, owner and complaint alone. Work done, parts used and
+    // the money are all added later on the invoice worksheet, where the catalogue, live stock and
+    // per-line editing live — asking for them twice was the point of the old second step.
 
-    // Step 1 Fields
+    // Vehicle, customer and complaint fields
     var vehicleType by remember { mutableStateOf("") }
     var vehiclePlate by remember { mutableStateOf(initialJob?.vehiclePlate ?: "") } // Vehicle Number
     var vehicleMake by remember { mutableStateOf("") }
@@ -5298,12 +6135,6 @@ fun CreateJobCardSheet(
         }
     }
 
-    // Step 2 Fields (Calculated catalog charges)
-    var tasksSelected by remember { mutableStateOf("") }
-    var partsListedSelection by remember { mutableStateOf("") }
-    var serviceChargesInput by remember { mutableStateOf("") }
-    var partsChargesInput by remember { mutableStateOf("") }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -5338,7 +6169,7 @@ fun CreateJobCardSheet(
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "Step $step of 2 • " + (if (step == 1) "Vehicle & Owner Particulars" else "Tasks, Spares & Billing"),
+                                text = "Vehicle, Owner & Complaint",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Normal,
                                 color = Color.White.copy(alpha = 0.85f)
@@ -5355,21 +6186,6 @@ fun CreateJobCardSheet(
                     }
                 }
 
-                // Step Bar Progress Line
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .background(Color(0xFFE5E7EB))
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(if (step == 1) 0.5f else 1.0f)
-                            .fillMaxHeight()
-                            .background(DeepIndigo)
-                    )
-                }
-
                 // Scrollable Form content
                 Column(
                     modifier = Modifier
@@ -5380,112 +6196,94 @@ fun CreateJobCardSheet(
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    if (step == 1) {
-                        // SECTION 1: VEHICLE DETAILS
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-                            Icon(
-                                imageVector = Icons.Outlined.DirectionsCar,
-                                contentDescription = null,
-                                tint = DeepIndigo,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "VEHICLE INFORMATION",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = DeepIndigo,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
+                    // SECTION 1: VEHICLE DETAILS
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+                        Icon(
+                            imageVector = Icons.Outlined.DirectionsCar,
+                            contentDescription = null,
+                            tint = DeepIndigo,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "VEHICLE INFORMATION",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = DeepIndigo,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
 
-                        // Compact side-by-side elements
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            SimpleFormDropdown(
-                                label = "Vehicle Type *",
-                                options = vehicleTypes,
-                                selectedOption = vehicleType,
-                                onOptionSelected = { vehicleType = it },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            OutlinedTextField(
-                                value = vehiclePlate,
-                                onValueChange = { 
-                                    vehiclePlate = it 
-                                    validationError = ""
-                                },
-                                label = { Text("Plate Number *", fontSize = 12.sp) },
-                                placeholder = { Text("MH12AB1234", fontSize = 12.sp) },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(1.2f).testTag("job_plate_field")
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            SimpleFormDropdown(
-                                label = "Make",
-                                options = currentMakes,
-                                selectedOption = vehicleMake,
-                                onOptionSelected = { vehicleMake = it },
-                                modifier = Modifier.weight(1f)
-                            )
-
-                            SimpleFormDropdown(
-                                label = "Model",
-                                options = currentModels,
-                                selectedOption = vehicleModel,
-                                onOptionSelected = { vehicleModel = it },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            SimpleFormDropdown(
-                                label = "Variant",
-                                options = currentVariants,
-                                selectedOption = vehicleVariant,
-                                onOptionSelected = { vehicleVariant = it },
-                                modifier = Modifier.weight(1.1f)
-                            )
-
-                            OutlinedTextField(
-                                value = kmReading,
-                                onValueChange = { kmReading = it },
-                                label = { Text("KM Reading", fontSize = 12.sp) },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(0.9f)
-                            )
-                        }
+                    // Compact side-by-side elements
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        SimpleFormDropdown(
+                            label = "Vehicle Type *",
+                            options = vehicleTypes,
+                            selectedOption = vehicleType,
+                            onOptionSelected = { vehicleType = it },
+                            modifier = Modifier.weight(1f)
+                        )
 
                         OutlinedTextField(
-                            value = fuelLevel,
-                            onValueChange = { fuelLevel = it },
-                            label = { Text("Fuel Level %", fontSize = 12.sp) },
+                            value = vehiclePlate,
+                            onValueChange = { 
+                                vehiclePlate = it 
+                                validationError = ""
+                            },
+                            label = { Text("Plate Number *", fontSize = 12.sp) },
+                            placeholder = { Text("MH12AB1234", fontSize = 12.sp) },
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = DeepIndigo,
+                                focusedLabelColor = DeepIndigo,
+                                unfocusedLabelColor = Color.Gray,
+                                cursorColor = DeepIndigo
+                            ),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                            modifier = Modifier.weight(1.2f).testTag("job_plate_field")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        SimpleFormDropdown(
+                            label = "Make",
+                            options = currentMakes,
+                            selectedOption = vehicleMake,
+                            onOptionSelected = { vehicleMake = it },
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        SimpleFormDropdown(
+                            label = "Model",
+                            options = currentModels,
+                            selectedOption = vehicleModel,
+                            onOptionSelected = { vehicleModel = it },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        SimpleFormDropdown(
+                            label = "Variant",
+                            options = currentVariants,
+                            selectedOption = vehicleVariant,
+                            onOptionSelected = { vehicleVariant = it },
+                            modifier = Modifier.weight(1.1f)
+                        )
+
+                        OutlinedTextField(
+                            value = kmReading,
+                            onValueChange = { kmReading = it },
+                            label = { Text("KM Reading", fontSize = 12.sp) },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -5495,98 +6293,59 @@ fun CreateJobCardSheet(
                                 cursorColor = DeepIndigo
                             ),
                             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.weight(0.9f)
                         )
+                    }
 
-                        // SECTION 2: CUSTOMER DETAILS
-                        Divider(color = Color(0xFFE5E7EB), thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
+                    OutlinedTextField(
+                        value = fuelLevel,
+                        onValueChange = { fuelLevel = it },
+                        label = { Text("Fuel Level %", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = DeepIndigo,
+                            focusedLabelColor = DeepIndigo,
+                            unfocusedLabelColor = Color.Gray,
+                            cursorColor = DeepIndigo
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Outlined.Person,
-                                contentDescription = null,
-                                tint = DeepIndigo,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "CUSTOMER OWNER DETAILS",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = DeepIndigo,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
+                    // SECTION 2: CUSTOMER DETAILS
+                    Divider(color = Color(0xFFE5E7EB), thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = customerName,
-                                onValueChange = { 
-                                    customerName = it 
-                                    validationError = ""
-                                },
-                                label = { Text("Full Name *", fontSize = 12.sp) },
-                                placeholder = { Text("Customer Name", fontSize = 12.sp) },
-                                singleLine = true,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(1.2f).testTag("job_customer_field")
-                            )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Outlined.Person,
+                            contentDescription = null,
+                            tint = DeepIndigo,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "CUSTOMER OWNER DETAILS",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = DeepIndigo,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
 
-                            OutlinedTextField(
-                                value = customerPhone,
-                                onValueChange = { 
-                                    customerPhone = it 
-                                    validationError = ""
-                                },
-                                label = { Text("Phone Number *", fontSize = 12.sp) },
-                                placeholder = { Text("10 Digit Phone", fontSize = 12.sp) },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(0.9f)
-                            )
-                        }
-
-                        // SECTION 3: REPAIR COMPLAINTS (Extremely compact)
-                        Divider(color = Color(0xFFE5E7EB), thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Outlined.Assignment,
-                                contentDescription = null,
-                                tint = DeepIndigo,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "JOB COMPLAINTS",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = DeepIndigo,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
-
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         OutlinedTextField(
-                            value = symptoms,
-                            onValueChange = { symptoms = it },
-                            label = { Text("Description of Symptoms", fontSize = 12.sp) },
-                            placeholder = { Text("Oil leaking, engine rattle...", fontSize = 12.sp) },
+                            value = customerName,
+                            onValueChange = { 
+                                customerName = it 
+                                validationError = ""
+                            },
+                            label = { Text("Full Name *", fontSize = 12.sp) },
+                            placeholder = { Text("Customer Name", fontSize = 12.sp) },
+                            singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = DeepIndigo,
                                 focusedLabelColor = DeepIndigo,
@@ -5594,125 +6353,76 @@ fun CreateJobCardSheet(
                                 cursorColor = DeepIndigo
                             ),
                             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(75.dp),
-                            maxLines = 2
-                        )
-
-                        if (validationError.isNotEmpty()) {
-                            Text(
-                                text = validationError,
-                                color = Color.Red,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 4.dp)
-                            )
-                        }
-                    } else {
-                        // STEP 2: WORK MAINTENANCE & PRICING
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-                            Icon(
-                                imageVector = Icons.Outlined.Build,
-                                contentDescription = null,
-                                tint = DeepIndigo,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "WORK & MATERIALS RECORD",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = DeepIndigo,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
-
-                        OutlinedTextField(
-                            value = tasksSelected,
-                            onValueChange = { tasksSelected = it },
-                            label = { Text("Completed Maintenance Tasks", fontSize = 12.sp) },
-                            placeholder = { Text("Tyre balance, Spark plug replacement", fontSize = 12.sp) },
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = DeepIndigo,
-                                focusedLabelColor = DeepIndigo,
-                                cursorColor = DeepIndigo
-                            ),
-                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.weight(1.2f).testTag("job_customer_field")
                         )
 
                         OutlinedTextField(
-                            value = partsListedSelection,
-                            onValueChange = { partsListedSelection = it },
-                            label = { Text("Materials/Parts Used", fontSize = 12.sp) },
-                            placeholder = { Text("Brake Pads - ₹1800.0, Oil - ₹450.0", fontSize = 12.sp) },
+                            value = customerPhone,
+                            onValueChange = { 
+                                customerPhone = it 
+                                validationError = ""
+                            },
+                            label = { Text("Phone Number *", fontSize = 12.sp) },
+                            placeholder = { Text("10 Digit Phone", fontSize = 12.sp) },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = DeepIndigo,
                                 focusedLabelColor = DeepIndigo,
+                                unfocusedLabelColor = Color.Gray,
                                 cursorColor = DeepIndigo
                             ),
                             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.weight(0.9f)
                         )
+                    }
 
-                        Divider(color = Color(0xFFE5E7EB), thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
+                    // SECTION 3: REPAIR COMPLAINTS (Extremely compact)
+                    Divider(color = Color(0xFFE5E7EB), thickness = 1.dp, modifier = Modifier.padding(vertical = 4.dp))
 
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Outlined.Payments,
-                                contentDescription = null,
-                                tint = DeepIndigo,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "BILLING DETAILS",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = DeepIndigo,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Outlined.Assignment,
+                            contentDescription = null,
+                            tint = DeepIndigo,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "JOB COMPLAINTS",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = DeepIndigo,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedTextField(
-                                value = serviceChargesInput,
-                                onValueChange = { serviceChargesInput = it },
-                                label = { Text("Labor Charges (₹)", fontSize = 12.sp) },
-                                placeholder = { Text("0.00", fontSize = 12.sp) },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(1f)
-                            )
+                    OutlinedTextField(
+                        value = symptoms,
+                        onValueChange = { symptoms = it },
+                        label = { Text("Description of Symptoms", fontSize = 12.sp) },
+                        placeholder = { Text("Oil leaking, engine rattle...", fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = DeepIndigo,
+                            focusedLabelColor = DeepIndigo,
+                            unfocusedLabelColor = Color.Gray,
+                            cursorColor = DeepIndigo
+                        ),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(75.dp),
+                        maxLines = 2
+                    )
 
-                            OutlinedTextField(
-                                value = partsChargesInput,
-                                onValueChange = { partsChargesInput = it },
-                                label = { Text("Spares Cost (₹)", fontSize = 12.sp) },
-                                placeholder = { Text("0.00", fontSize = 12.sp) },
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = DeepIndigo,
-                                    focusedLabelColor = DeepIndigo,
-                                    unfocusedLabelColor = Color.Gray,
-                                    cursorColor = DeepIndigo
-                                ),
-                                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                    if (validationError.isNotEmpty()) {
+                        Text(
+                            text = validationError,
+                            color = Color.Red,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
                     }
                 }
 
@@ -5725,46 +6435,24 @@ fun CreateJobCardSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (step > 1) {
-                        OutlinedButton(
-                            onClick = { step -= 1 },
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = DeepIndigo),
-                            border = BorderStroke(1.dp, DeepIndigo),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.height(38.dp)
-                        ) {
-                            Text("Back", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                        }
-                    } else {
-                        TextButton(
-                            onClick = onDismiss,
-                            colors = ButtonDefaults.textButtonColors(contentColor = Color.Gray),
-                            modifier = Modifier.height(38.dp)
-                        ) {
-                            Text("Cancel", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        }
+                    TextButton(
+                        onClick = onDismiss,
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color.Gray),
+                        modifier = Modifier.height(38.dp)
+                    ) {
+                        Text("Cancel", fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
 
                     Button(
                         onClick = {
-                            if (step == 1) {
-                                if (vehicleType.isBlank()) {
-                                    validationError = "Please select the Vehicle Type first"
-                                } else if (vehiclePlate.isBlank() || customerName.isBlank() || customerPhone.isBlank()) {
-                                    validationError = "Please fill out all required fields marked with *"
-                                } else if (customerPhone.filter { it.isDigit() }.length < 10) {
-                                    validationError = "Please enter a valid 10-digit Phone Number"
-                                } else {
-                                    validationError = ""
-                                    step = 2
-                                }
+                            if (vehicleType.isBlank()) {
+                                validationError = "Please select the Vehicle Type first"
+                            } else if (vehiclePlate.isBlank() || customerName.isBlank() || customerPhone.isBlank()) {
+                                validationError = "Please fill out all required fields marked with *"
+                            } else if (customerPhone.filter { it.isDigit() }.length < 10) {
+                                validationError = "Please enter a valid 10-digit Phone Number"
                             } else {
-                                // Calculations & Save Direct
-                                val sc = serviceChargesInput.toDoubleOrNull() ?: 0.0
-                                val pc = partsChargesInput.toDoubleOrNull() ?: 0.0
-                                val tax = (sc + pc) * 0.077 // retaining standard 7.7% GST calculation
-                                val total = sc + pc + tax
-
+                                validationError = ""
                                 val dynamicVehicleName = "$vehicleType: $vehicleMake $vehicleModel $vehicleVariant (KM: $kmReading, Fuel: $fuelLevel%)"
 
                                 viewModel.addJobCard(
@@ -5776,14 +6464,13 @@ fun CreateJobCardSheet(
                                         symptoms = symptoms,
                                         diagnosis = "Standard Checkup",
                                         status = "OPEN",
-                                        // Start empty — items belong on the invoice only when
-                                        // the user actually adds them.
-                                        tasks = tasksSelected,
-                                        materials = partsListedSelection,
-                                        serviceCharges = sc,
-                                        partsCharges = pc,
-                                        taxes = tax,
-                                        totalAmount = total
+                                        // Opens with nothing billed: services, spares and lubes
+                                        // are added on the invoice worksheet.
+                                        vehicleMake = vehicleMake,
+                                        vehicleModel = vehicleModel,
+                                        vehicleVariant = vehicleVariant,
+                                        vehicleKm = kmReading,
+                                        vehicleFuel = fuelLevel
                                     )
                                 )
                                 viewModel.clearDiagnostics()
@@ -5794,7 +6481,7 @@ fun CreateJobCardSheet(
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.height(38.dp)
                     ) {
-                        Text(if (step < 2) "Continue" else "Save Job Card", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        Text("Save Job Card", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                     }
                 }
             }
@@ -5816,9 +6503,33 @@ data class InvoiceRowItem(
     val description: String,
     val qty: Int,
     val price: Double,
-    val isService: Boolean
+    val isService: Boolean,
+    /**
+     * Position of this row inside its own source list (`tasks` or `materials`).
+     *
+     * Editing and deleting used to match on the description text, which silently hit the wrong
+     * line whenever a bill listed the same part twice. The index is what actually identifies the
+     * entry, so both operations use it.
+     */
+    val sourceIndex: Int = 0
 ) {
     val total: Double get() = qty * price
+}
+
+/**
+ * Renders one line back into the comma-separated form the job card stores.
+ *
+ * Written as `Name (qty) @ ₹unitPrice`. The `@` matters: job cards created by earlier versions
+ * wrote `Name (qty) - ₹total`, where the figure after the dash was the *line* total, not the unit
+ * price. Reusing that shape would have made every multi-quantity part reload at a fraction of its
+ * price. The two markers are read differently by [parseInvoiceItems], so old bills keep their
+ * totals and new ones round-trip exactly — which is what lets an edited price stick instead of
+ * snapping back to the catalogue rate.
+ */
+fun formatInvoiceItem(description: String, qty: Int, price: Double): String {
+    // Commas separate entries and parentheses carry the quantity, so neither can appear in a name.
+    val safeName = description.replace(",", " ").replace("(", "[").replace(")", "]").trim()
+    return "$safeName ($qty) @ ₹${String.format("%.2f", price)}"
 }
 
 fun getPriceForService(title: String): Double {
@@ -5856,58 +6567,118 @@ fun getPriceForMaterial(title: String): Double {
     }
 }
 
+/**
+ * Splits one stored entry into name, quantity and unit price.
+ *
+ * Three shapes are accepted, so no bill written by an earlier version changes value when it is
+ * reopened:
+ *  - `Engine Oil Change` — bare name, price looked up through [fallbackPrice];
+ *  - `Clutch Cable (2) - ₹300` — the legacy shape, where the figure is the whole line;
+ *  - `Clutch Cable (2) @ ₹150` — what [formatInvoiceItem] writes now, a unit price.
+ *
+ * A written-down price always beats the catalogue, which is what makes an edited rate stick.
+ */
+private fun parseInvoiceEntry(
+    raw: String,
+    isService: Boolean,
+    fallbackPrice: (String) -> Double
+): Triple<String, Int, Double>? {
+    val trimmed = raw.trim()
+    if (trimmed.isBlank()) return null
+
+    var name = trimmed
+    var qty = 1
+    var price = 0.0
+    var pricedExplicitly = false
+    var priceIsPerUnit = false
+
+    fun readPriceAfter(marker: String, perUnit: Boolean): Boolean {
+        // The *last* marker wins, so a hyphenated name ("Multi-point check - ₹400") still parses.
+        val at = trimmed.lastIndexOf(marker)
+        if (at <= 0) return false
+        val figure = trimmed.substring(at + marker.length)
+            .replace("$", "").replace("₹", "").replace(",", "").trim()
+        val parsed = figure.toDoubleOrNull() ?: return false
+        price = parsed
+        pricedExplicitly = true
+        priceIsPerUnit = perUnit
+        name = trimmed.substring(0, at).trim()
+        return true
+    }
+
+    if (!readPriceAfter(" @ ", perUnit = true)) readPriceAfter(" - ", perUnit = false)
+
+    val qtyMatcher = java.util.regex.Pattern.compile("\\((\\d+)\\)\\s*$").matcher(name)
+    if (qtyMatcher.find()) {
+        qty = qtyMatcher.group(1)?.toIntOrNull()?.coerceAtLeast(1) ?: 1
+        name = name.substring(0, qtyMatcher.start()).trim()
+    }
+
+    if (!pricedExplicitly) price = fallbackPrice(name)
+    // Legacy material entries carried the line total; everything else is already per unit.
+    val unitPrice =
+        if (!isService && pricedExplicitly && !priceIsPerUnit && qty > 1) price / qty else price
+
+    return Triple(name.ifBlank { trimmed }, qty, unitPrice)
+}
+
 fun parseInvoiceItems(tasks: String, materials: String): List<InvoiceRowItem> {
     val rowItems = mutableListOf<InvoiceRowItem>()
     var index = 1
 
     // Parse tasks (services)
     if (tasks.isNotBlank()) {
-        tasks.split(",").forEach { s ->
-            val trimmed = s.trim()
-            if (trimmed.isNotBlank()) {
-                val price = getPriceForService(trimmed)
-                rowItems.add(InvoiceRowItem(index++, trimmed, 1, price, true))
-            }
+        tasks.split(",").forEachIndexed { sourceIndex, s ->
+            parseInvoiceEntry(s, isService = true, fallbackPrice = ::getPriceForService)
+                ?.let { (name, qty, price) ->
+                    rowItems.add(InvoiceRowItem(index++, name, qty, price, true, sourceIndex))
+                }
         }
     }
 
     // Parse materials (spares/lubes)
     if (materials.isNotBlank()) {
-        materials.split(",").forEach { m ->
-            val trimmed = m.trim()
-            if (trimmed.isNotBlank()) {
-                try {
-                    var name = trimmed
-                    var qty = 1
-                    var price = 0.0
-
-                    // Parse Qty: e.g. "Clutch Cable (2)" or similar
-                    val qtyMatcher = java.util.regex.Pattern.compile("\\((\\d+)\\)").matcher(trimmed)
-                    if (qtyMatcher.find()) {
-                        qty = qtyMatcher.group(1)?.toIntOrNull() ?: 1
-                        name = trimmed.substring(0, qtyMatcher.start()).trim()
-                    }
-
-                    // Parse Price format: " - ₹150" or " - $150"
-                    val priceParts = trimmed.split("-")
-                    if (priceParts.size > 1) {
-                        val priceStr = priceParts[1].replace("$", "").replace("₹", "").trim()
-                        price = priceStr.toDoubleOrNull() ?: 0.0
-                        name = priceParts[0].replace(Regex("\\(.*\\)"), "").trim()
-                    }
-
-                    if (price == 0.0) {
-                        price = getPriceForMaterial(name)
-                    }
-
-                    rowItems.add(InvoiceRowItem(index++, name, qty, price, false))
-                } catch (e: Exception) {
-                    rowItems.add(InvoiceRowItem(index++, trimmed, 1, 150.0, false))
+        materials.split(",").forEachIndexed { sourceIndex, m ->
+            parseInvoiceEntry(m, isService = false, fallbackPrice = ::getPriceForMaterial)
+                ?.let { (name, qty, price) ->
+                    rowItems.add(InvoiceRowItem(index++, name, qty, price, false, sourceIndex))
                 }
-            }
         }
     }
     return rowItems
+}
+
+/**
+ * Re-prices a job card from its item lists.
+ *
+ * Every add, edit and delete on the invoice ended up repeating the same four lines of arithmetic
+ * with an 18% rate written into each copy, so turning GST off — or applying a discount — had to be
+ * remembered in eight places. This is the one place the bill is totalled: subtotals from the rows,
+ * GST from [GarageSettings] (zero when the owner has switched it off), then the discount taken off
+ * the end.
+ */
+fun recalculatedJob(
+    job: JobCardEntity,
+    tasks: String = job.tasks,
+    materials: String = job.materials,
+    discount: Double = job.discount
+): JobCardEntity {
+    val rows = parseInvoiceItems(tasks, materials)
+    val serviceCharges = rows.filter { it.isService }.sumOf { it.total }
+    val partsCharges = rows.filterNot { it.isService }.sumOf { it.total }
+    val tax = GarageSettings.current.taxOn(serviceCharges + partsCharges)
+    val gross = serviceCharges + partsCharges + tax
+    // A discount can zero a bill but never turn it into a refund.
+    val appliedDiscount = discount.coerceIn(0.0, gross)
+    return job.copy(
+        tasks = tasks,
+        materials = materials,
+        serviceCharges = serviceCharges,
+        partsCharges = partsCharges,
+        taxes = tax,
+        discount = appliedDiscount,
+        totalAmount = gross - appliedDiscount
+    )
 }
 
 fun convertAmountToWords(amount: Double): String {
@@ -6271,14 +7042,19 @@ fun SelectLubeDialog(
 @Composable
 fun ReceivePaymentDialog(
     totalBill: Double,
+    existingDiscount: Double = 0.0,
     onDismiss: () -> Unit,
-    onPaymentConfirmed: (Double, String) -> Unit
+    onPaymentConfirmed: (netReceived: Double, discount: Double, mode: String) -> Unit
 ) {
-    var discountInput by remember { mutableStateOf("0") }
+    // Seeded with whatever discount the invoice already carries, so the figure the customer was
+    // shown is the figure being collected.
+    var discountInput by remember {
+        mutableStateOf(if (existingDiscount > 0) String.format("%.2f", existingDiscount) else "0")
+    }
     var selectedPaymentMode by remember { mutableStateOf("Online") } // Online or Cash
 
     val totalDouble = totalBill
-    val discountDouble = discountInput.trim().toDoubleOrNull() ?: 0.0
+    val discountDouble = (discountInput.trim().toDoubleOrNull() ?: 0.0).coerceIn(0.0, totalDouble)
     val finalPayable = maxOf(0.0, totalDouble - discountDouble)
 
     Dialog(onDismissRequest = onDismiss) {
@@ -6316,6 +7092,11 @@ fun ReceivePaymentDialog(
                 ) {
                     Text("Total Invoice Value", fontSize = 14.sp, color = Color(0xFF475569))
                     Text("₹${String.format("%.2f", totalDouble)}", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF0F172A))
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Discount", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFDC2626))
+                    Text("− ₹${String.format("%.2f", discountDouble)}", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFFDC2626))
                 }
 
                 // Discount Input
@@ -6396,7 +7177,7 @@ fun ReceivePaymentDialog(
 
                 // Submit Action Button
                 Button(
-                    onClick = { onPaymentConfirmed(finalPayable, selectedPaymentMode) },
+                    onClick = { onPaymentConfirmed(finalPayable, discountDouble, selectedPaymentMode) },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -6410,39 +7191,539 @@ fun ReceivePaymentDialog(
     }
 }
 
+/**
+ * Popup that edits one line of the bill.
+ *
+ * Reached from the pencil on each row. Every field the line carries is here — description,
+ * quantity, unit price and whether it bills as labour or as a part — because a workshop that
+ * quotes a non-standard rate for a job needs to say so on the invoice itself, not work around it
+ * by deleting the line and re-adding a custom one.
+ */
+@Composable
+fun EditInvoiceItemDialog(
+    item: InvoiceRowItem,
+    stockOnHand: Int?,
+    onDismiss: () -> Unit,
+    onSave: (description: String, qty: Int, price: Double, isService: Boolean) -> Unit
+) {
+    var description by remember { mutableStateOf(item.description) }
+    var qtyText by remember { mutableStateOf(item.qty.toString()) }
+    var priceText by remember { mutableStateOf(String.format("%.2f", item.price)) }
+    var isService by remember { mutableStateOf(item.isService) }
+
+    val qty = qtyText.toIntOrNull() ?: 0
+    val price = priceText.toDoubleOrNull() ?: 0.0
+    val valid = description.isNotBlank() && qty > 0 && price >= 0.0
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Edit Bill Item", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Color(0xFF0F172A))
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF64748B), modifier = Modifier.size(18.dp))
+                    }
+                }
+
+                Divider(color = Color(0xFFE2E8F0))
+
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("Description", fontSize = 12.sp) },
+                    singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = qtyText,
+                        onValueChange = { qtyText = it.filter { ch -> ch.isDigit() } },
+                        label = { Text("Quantity", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = priceText,
+                        onValueChange = { priceText = it },
+                        label = { Text("Unit Price (₹)", fontSize = 12.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Bills as", fontSize = 12.sp, color = Color(0xFF64748B))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    FilterChip(
+                        selected = isService,
+                        onClick = { isService = true },
+                        label = { Text("Labour", fontSize = 11.sp) }
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    FilterChip(
+                        selected = !isService,
+                        onClick = { isService = false },
+                        label = { Text("Part / Lube", fontSize = 11.sp) }
+                    )
+                }
+
+                if (stockOnHand != null) {
+                    Text(
+                        text = "In stock: $stockOnHand • changing the quantity adjusts the stock list",
+                        fontSize = 11.sp,
+                        color = Color(0xFF64748B)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Line total", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
+                    Text(
+                        "₹${String.format("%.2f", qty * price)}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF5B4DFF)
+                    )
+                }
+
+                Button(
+                    onClick = { onSave(description.trim(), qty, price, isService) },
+                    enabled = valid,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5B4DFF)),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Save Item", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+/** Popup for the flat discount, which the invoice then shows as its own deduction line. */
+@Composable
+fun EditDiscountDialog(
+    currentDiscount: Double,
+    grossAmount: Double,
+    onDismiss: () -> Unit,
+    onSave: (Double) -> Unit
+) {
+    var discountText by remember { mutableStateOf(if (currentDiscount > 0) String.format("%.2f", currentDiscount) else "") }
+    val discount = (discountText.toDoubleOrNull() ?: 0.0).coerceIn(0.0, grossAmount)
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Discount", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Color(0xFF0F172A))
+                Divider(color = Color(0xFFE2E8F0))
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Bill before discount", fontSize = 13.sp, color = Color(0xFF64748B))
+                    Text("₹${String.format("%.2f", grossAmount)}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF0F172A))
+                }
+
+                OutlinedTextField(
+                    value = discountText,
+                    onValueChange = { discountText = it },
+                    label = { Text("Flat Discount (₹)", fontSize = 12.sp) },
+                    placeholder = { Text("0", fontSize = 12.sp) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Payable after discount", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF047857))
+                    Text(
+                        "₹${String.format("%.2f", grossAmount - discount)}",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF047857)
+                    )
+                }
+
+                Button(
+                    onClick = { onSave(discount) },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5B4DFF)),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Apply Discount", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Popup for the vehicle particulars that are printed on the invoice.
+ *
+ * The job card composes a display name out of these when it is created; keeping them as their own
+ * fields is what lets a wrong registration or an unrecorded odometer reading be corrected before
+ * the invoice goes out.
+ */
+@Composable
+fun EditVehicleDetailsDialog(
+    job: JobCardEntity,
+    onDismiss: () -> Unit,
+    onSave: (JobCardEntity) -> Unit
+) {
+    var plate by remember { mutableStateOf(job.vehiclePlate) }
+    var make by remember { mutableStateOf(job.vehicleMake) }
+    var model by remember { mutableStateOf(job.vehicleModel) }
+    var variant by remember { mutableStateOf(job.vehicleVariant) }
+    var km by remember { mutableStateOf(job.vehicleKm) }
+    var fuel by remember { mutableStateOf(job.vehicleFuel) }
+
+    @Composable
+    fun field(value: String, onChange: (String) -> Unit, label: String, modifier: Modifier, numeric: Boolean = false) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onChange,
+            label = { Text(label, fontSize = 11.sp) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = if (numeric) KeyboardType.Number else KeyboardType.Text),
+            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+            shape = RoundedCornerShape(8.dp),
+            modifier = modifier
+        )
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Vehicle Details", fontWeight = FontWeight.ExtraBold, fontSize = 17.sp, color = Color(0xFF0F172A))
+                Divider(color = Color(0xFFE2E8F0))
+
+                field(plate, { plate = it }, "Registration Plate", Modifier.fillMaxWidth())
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    field(make, { make = it }, "Make", Modifier.weight(1f))
+                    field(model, { model = it }, "Model", Modifier.weight(1f))
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    field(variant, { variant = it }, "Variant", Modifier.weight(1f))
+                    field(km, { km = it }, "KM Reading", Modifier.weight(1f), numeric = true)
+                }
+
+                field(fuel, { fuel = it }, "Fuel Level %", Modifier.fillMaxWidth(), numeric = true)
+
+                Button(
+                    onClick = {
+                        // The display name is regenerated from the edited parts, so the job list
+                        // and the invoice header cannot drift apart from these fields.
+                        val prefix = job.vehicleName.substringBefore(":", "").trim()
+                        val descriptive = listOf(make, model, variant)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" ")
+                        val composed = buildString {
+                            if (prefix.isNotBlank()) append("$prefix: ")
+                            append(descriptive.ifBlank { job.vehicleName.substringAfter(":", job.vehicleName).trim() })
+                            if (km.isNotBlank() || fuel.isNotBlank()) {
+                                append(" (KM: ${km.ifBlank { "-" }}, Fuel: ${fuel.ifBlank { "-" }}%)")
+                            }
+                        }.trim()
+
+                        onSave(
+                            job.copy(
+                                vehiclePlate = plate.trim(),
+                                vehicleMake = make.trim(),
+                                vehicleModel = model.trim(),
+                                vehicleVariant = variant.trim(),
+                                vehicleKm = km.trim(),
+                                vehicleFuel = fuel.trim(),
+                                vehicleName = composed.ifBlank { job.vehicleName }
+                            )
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5B4DFF)),
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Save Vehicle Details", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
+            }
+        }
+    }
+}
+
+/** One selectable line in the Add Item drawer — deliberately a single compact row. */
+@Composable
+private fun DrawerCatalogueRow(
+    title: String,
+    price: Double,
+    stockOnHand: Int?,
+    blocked: Boolean,
+    accent: Color,
+    qty: Int,
+    onQtyChange: (Int) -> Unit,
+    onAdd: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (blocked) Color(0xFFFEF2F2) else Color(0xFFF8FAFC))
+            .border(1.dp, if (blocked) Color(0xFFFECACA) else Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                color = Color(0xFF1E293B),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = buildString {
+                    append("₹${String.format("%.0f", price)}")
+                    if (stockOnHand != null) append("  •  ${if (blocked) "out of stock" else "stock $stockOnHand"}")
+                },
+                fontSize = 10.sp,
+                color = if (blocked) Color(0xFFDC2626) else Color(0xFF64748B),
+                fontWeight = if (blocked) FontWeight.Bold else FontWeight.Normal
+            )
+        }
+
+        // Quantity stepper, then add — kept on one line so a long catalogue stays scannable.
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { if (qty > 1) onQtyChange(qty - 1) }, modifier = Modifier.size(22.dp)) {
+                Text("−", fontWeight = FontWeight.Black, fontSize = 13.sp, color = Color(0xFF475569))
+            }
+            Text(
+                "$qty",
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                color = Color(0xFF0F172A),
+                modifier = Modifier.widthIn(min = 18.dp),
+                textAlign = TextAlign.Center
+            )
+            IconButton(onClick = { onQtyChange(qty + 1) }, modifier = Modifier.size(22.dp)) {
+                Text("+", fontWeight = FontWeight.Black, fontSize = 13.sp, color = Color(0xFF475569))
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+            IconButton(
+                onClick = onAdd,
+                enabled = !blocked,
+                modifier = Modifier
+                    .size(26.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(if (blocked) Color(0xFFCBD5E1) else accent)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.White, modifier = Modifier.size(13.dp))
+            }
+        }
+    }
+}
+
 @Composable
 fun InvoiceBreakdownPage(
     viewModel: GarageViewModel,
     jobCard: JobCardEntity,
+    inventory: List<InventoryItemEntity>,
+    customerProfiles: List<CustomerProfileEntity>,
     onDismiss: () -> Unit,
     onSavePdf: (JobCardEntity) -> Unit,
     onPaidAndClosed: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val settings by GarageSettings.state.collectAsState()
 
     // Live state connection for instant reactivity on item add/delete
     val allJobs by viewModel.jobCards.collectAsState()
     val activeJobCard = allJobs.find { it.id == jobCard.id } ?: jobCard
+
+    val isClosed = activeJobCard.status.equals("CLOSED", ignoreCase = true)
+    // A closed bill is read-only until the owner deliberately reopens it for correction — that
+    // switch is what requirement "edit closed bills" asks for, without making a paid invoice
+    // silently editable every time it is opened.
+    var closedBillUnlocked by remember(activeJobCard.id) { mutableStateOf(false) }
+    val canEdit = !isClosed || closedBillUnlocked
 
     // Custom item state
     var customItemName by remember { mutableStateOf("") }
     var customItemPrice by remember { mutableStateOf("") }
     var customIsService by remember { mutableStateOf(true) }
 
-    // Drawer state
+    // Drawer & popup state
     var showAddItemDrawer by remember { mutableStateOf(false) }
     var drawerTab by remember { mutableStateOf("Services") }
     var showPaymentSelector by remember { mutableStateOf(false) }
+    var editingRow by remember { mutableStateOf<InvoiceRowItem?>(null) }
+    var showDiscountDialog by remember { mutableStateOf(false) }
+    var showVehicleDialog by remember { mutableStateOf(false) }
+    var showReopenConfirm by remember { mutableStateOf(false) }
 
     // Parse list of tasks & components
     val rowItems = remember(activeJobCard.tasks, activeJobCard.materials) {
         parseInvoiceItems(activeJobCard.tasks, activeJobCard.materials)
     }
 
-    val aiResult by viewModel.aiResult.collectAsState()
-    val isAiLoading by viewModel.isAiLoading.collectAsState()
+    // The client's own code, printed alongside the name so a walk-in can be looked up later.
+    val clientCode = remember(customerProfiles, activeJobCard.customerPhone, activeJobCard.customerName) {
+        customerProfiles.firstOrNull {
+            (it.phone.isNotBlank() && it.phone.filter { c -> c.isDigit() } ==
+                activeJobCard.customerPhone.filter { c -> c.isDigit() }) ||
+                it.name.equals(activeJobCard.customerName, ignoreCase = true)
+        }?.clientId.orEmpty()
+    }
 
-    val servicesList: List<MasterItem> = listOf(
+    /** The stock row a bill line was taken from, if the workshop actually carries that item. */
+    fun stockRowFor(name: String): InventoryItemEntity? =
+        inventory.firstOrNull { it.name.trim().equals(name.trim(), ignoreCase = true) }
+
+    /** Splits a stored list, drops blanks and keeps the positions [InvoiceRowItem.sourceIndex] uses. */
+    fun entriesOf(raw: String): MutableList<String> =
+        if (raw.isBlank()) mutableListOf() else raw.split(",").toMutableList()
+
+    fun persist(updated: JobCardEntity) = viewModel.addJobCard(updated)
+
+    /**
+     * Writes a rebuilt item list back onto the job card and re-totals it.
+     * The status is left alone, so correcting a closed bill keeps it closed.
+     */
+    fun applyItems(tasks: String, materials: String) {
+        persist(recalculatedJob(activeJobCard, tasks = tasks, materials = materials))
+    }
+
+    /**
+     * Adds one line, taking the units off the stock list when the item is one the workshop carries.
+     *
+     * With stock validation switched on, an item the shelf cannot cover is refused outright rather
+     * than billed and left to be reconciled by hand later.
+     */
+    fun addLine(name: String, qty: Int, unitPrice: Double, isService: Boolean, fromStock: Boolean): Boolean {
+        val stockRow = if (fromStock) stockRowFor(name) else null
+        if (stockRow != null && settings.stockValidationEnabled && stockRow.quantity < qty) {
+            Toast.makeText(
+                context,
+                "Only ${stockRow.quantity} of ${stockRow.name} in stock — cannot add $qty",
+                Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+
+        val entry = formatInvoiceItem(name, qty, unitPrice)
+        if (isService) {
+            val entries = entriesOf(activeJobCard.tasks).apply { add(entry) }
+            applyItems(entries.joinToString(","), activeJobCard.materials)
+        } else {
+            val entries = entriesOf(activeJobCard.materials).apply { add(entry) }
+            applyItems(activeJobCard.tasks, entries.joinToString(","))
+        }
+
+        stockRow?.let { viewModel.adjustInventoryQuantity(it, -qty) }
+        return true
+    }
+
+    /** Removes a line by its position and puts any consumed stock back on the shelf. */
+    fun removeLine(item: InvoiceRowItem) {
+        if (item.isService) {
+            val entries = entriesOf(activeJobCard.tasks)
+            if (item.sourceIndex in entries.indices) entries.removeAt(item.sourceIndex)
+            applyItems(entries.joinToString(","), activeJobCard.materials)
+        } else {
+            val entries = entriesOf(activeJobCard.materials)
+            if (item.sourceIndex in entries.indices) entries.removeAt(item.sourceIndex)
+            applyItems(activeJobCard.tasks, entries.joinToString(","))
+        }
+        stockRowFor(item.description)?.let { viewModel.adjustInventoryQuantity(it, item.qty) }
+    }
+
+    /**
+     * Rewrites a line in place, moving it between the two lists if its billing type changed.
+     * Returns false when validation refuses the change, so the popup can stay open.
+     */
+    fun updateLine(original: InvoiceRowItem, description: String, qty: Int, price: Double, isService: Boolean): Boolean {
+        val sameItem = description.trim().equals(original.description, ignoreCase = true)
+        val stockRowForEdit = if (sameItem) stockRowFor(original.description) else null
+        val extraNeeded = qty - original.qty
+
+        // Raising the quantity draws more off the shelf, so the same rule that guards adding an
+        // item has to guard editing one.
+        if (stockRowForEdit != null && settings.stockValidationEnabled && extraNeeded > stockRowForEdit.quantity) {
+            Toast.makeText(
+                context,
+                "Only ${stockRowForEdit.quantity} more of ${stockRowForEdit.name} in stock",
+                Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+
+        val tasks = entriesOf(activeJobCard.tasks)
+        val materials = entriesOf(activeJobCard.materials)
+        val entry = formatInvoiceItem(description, qty, price)
+
+        val sourceList = if (original.isService) tasks else materials
+        if (original.sourceIndex !in sourceList.indices) return false
+
+        if (original.isService == isService) {
+            sourceList[original.sourceIndex] = entry
+        } else {
+            sourceList.removeAt(original.sourceIndex)
+            (if (isService) tasks else materials).add(entry)
+        }
+
+        applyItems(tasks.joinToString(","), materials.joinToString(","))
+
+        // Only the *change* in quantity moves stock: re-saving a line without touching its
+        // quantity must not deduct the same units a second time.
+        stockRowForEdit?.let { viewModel.adjustInventoryQuantity(it, -extraNeeded) }
+        return true
+    }
+
+    val servicesCatalogue: List<MasterItem> = listOf(
         MasterItem("Engine Oil Change", 300.0),
         MasterItem("Oil Filter Replacement", 150.0),
         MasterItem("Air Filter Cleaning", 80.0),
@@ -6454,23 +7735,10 @@ fun InvoiceBreakdownPage(
         MasterItem("Chain Adjustment", 80.0)
     )
 
-    val sparesList: List<MasterItem> = listOf(
-        MasterItem("Clutch Cable", 150.0, 2),
-        MasterItem("Throttle Assembly", 400.0, 2),
-        MasterItem("Speedometer", 1200.0, 1),
-        MasterItem("Speedometer Gear", 300.0, 5),
-        MasterItem("Odometer Cable", 150.0, 3),
-        MasterItem("Digital Meter", 2000.0, 2),
-        MasterItem("Indicator Buzzer", 80.0, 12),
-        MasterItem("Flasher Relay", 120.0, 7),
-        MasterItem("Wiring Harness", 800.0, 2)
-    )
-
-    val lubesList: List<MasterItem> = listOf(
-        MasterItem("Engine Oil (1L Mineral)", 350.0, 5),
-        MasterItem("Engine Oil (1L Semi Synthetic)", 600.0, 3),
-        MasterItem("Engine Oil (1L Fully Synthetic)", 900.0, 4)
-    )
+    // The drawer bills what the workshop actually holds, so adding a part can move real stock.
+    val stockFor: (String) -> List<InventoryItemEntity> = { type ->
+        inventory.filter { it.stockType.equals(type, ignoreCase = true) }.sortedBy { it.name }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -6506,7 +7774,7 @@ fun InvoiceBreakdownPage(
                             // Print PDF
                             IconButton(
                                 onClick = {
-                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard)
+                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard, clientCode)
                                     if (file != null) {
                                         com.example.util.InvoicePdfGenerator.printPdf(context, file)
                                     }
@@ -6518,7 +7786,7 @@ fun InvoiceBreakdownPage(
                             // Share PDF
                             IconButton(
                                 onClick = {
-                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard)
+                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard, clientCode)
                                     if (file != null) {
                                         com.example.util.InvoicePdfGenerator.sharePdf(context, file, activeJobCard)
                                     }
@@ -6530,7 +7798,7 @@ fun InvoiceBreakdownPage(
                             // Open / Download PDF
                             IconButton(
                                 onClick = {
-                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard)
+                                    val file = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard, clientCode)
                                     if (file != null) {
                                         com.example.util.InvoicePdfGenerator.openPdf(context, file)
                                     }
@@ -6553,10 +7821,15 @@ fun InvoiceBreakdownPage(
             },
             containerColor = Color(0xFFF1F5F9)
         ) { paddingValues ->
-            Column(
+            // The drawer lives inside this box rather than over the whole window, so it opens
+            // exactly against the app's own content area instead of across the status bar.
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
+            ) {
+            Column(
+                modifier = Modifier.fillMaxSize()
             ) {
                 // Invoice paper center worksheet (Scrollable content)
                 Column(
@@ -6566,6 +7839,54 @@ fun InvoiceBreakdownPage(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // A closed bill says so, and offers the way back into editing.
+                    if (isClosed) {
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (closedBillUnlocked) Color(0xFFFEF3C7) else Color(0xFFF1F5F9)
+                            ),
+                            border = BorderStroke(1.dp, if (closedBillUnlocked) Color(0xFFFCD34D) else Color(0xFFE2E8F0)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = if (closedBillUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = if (closedBillUnlocked) Color(0xFFB45309) else Color(0xFF64748B),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (closedBillUnlocked)
+                                        "Editing a closed bill — changes are saved to the closed invoice"
+                                    else
+                                        "This bill is closed and locked",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (closedBillUnlocked) Color(0xFFB45309) else Color(0xFF64748B),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = {
+                                        if (closedBillUnlocked) closedBillUnlocked = false else showReopenConfirm = true
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                ) {
+                                    Text(
+                                        text = if (closedBillUnlocked) "Done" else "Edit Bill",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF5B4DFF)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     // White Invoice Paper Card
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Color.White),
@@ -6613,11 +7934,19 @@ fun InvoiceBreakdownPage(
                                             fontSize = 14.sp,
                                             color = Color(0xFF0F172A)
                                         )
-                                        if (GarageSession.ownerName.isNotBlank()) {
-                                            Text(GarageSession.ownerName, fontSize = 10.sp, color = Color(0xFF64748B))
+                                        if (settings.address.isNotBlank()) {
+                                            Text(settings.address, fontSize = 10.sp, color = Color(0xFF64748B))
                                         }
                                         if (GarageSession.ownerPhone.isNotBlank()) {
                                             Text("Contact: ${GarageSession.ownerPhone}", fontSize = 10.sp, color = Color(0xFF64748B))
+                                        }
+                                        if (settings.gstEnabled && settings.gstin.isNotBlank()) {
+                                            Text(
+                                                "GSTIN: ${settings.gstin}",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF475569)
+                                            )
                                         }
                                     }
                                 }
@@ -6635,6 +7964,9 @@ fun InvoiceBreakdownPage(
                                         }
                                     )
                                     Text("Document #: GG-${activeJobCard.id}", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                    if (settings.clientId.isNotBlank()) {
+                                        Text("Client ID: ${settings.clientId}", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                                    }
                                     val formattedDateStr = SimpleDateFormat("dd-MM-yyyy HH:mm", Locale.getDefault()).format(Date(activeJobCard.creationTime))
                                     Text("Date: $formattedDateStr", fontSize = 10.sp, color = Color(0xFF64748B))
                                 }
@@ -6654,14 +7986,59 @@ fun InvoiceBreakdownPage(
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(activeJobCard.customerName, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
                                     Text("Phone: ${activeJobCard.customerPhone}", fontSize = 11.sp, color = Color(0xFF64748B))
+                                    if (clientCode.isNotBlank()) {
+                                        Text(
+                                            "Client ID: $clientCode",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFF4F46E5)
+                                        )
+                                    }
                                 }
 
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(t("inv.vehicleInfo"), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(t("inv.vehicleInfo"), fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF94A3B8))
+                                        if (canEdit) {
+                                            IconButton(
+                                                onClick = { showVehicleDialog = true },
+                                                modifier = Modifier.size(20.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Edit,
+                                                    contentDescription = "Edit vehicle details",
+                                                    tint = Color(0xFF5B4DFF),
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(activeJobCard.vehiclePlate.uppercase(), fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
-                                    val cleanVehicle = activeJobCard.vehicleName.replace(Regex("(?i)Bike:|Scooter:|Car:"), "").trim()
-                                    Text(cleanVehicle, fontSize = 11.sp, color = Color(0xFF64748B))
+
+                                    // Printed particulars, when the owner has left them switched on.
+                                    if (settings.showVehicleOnInvoice) {
+                                        val descriptive = listOf(
+                                            activeJobCard.vehicleMake,
+                                            activeJobCard.vehicleModel,
+                                            activeJobCard.vehicleVariant
+                                        ).filter { it.isNotBlank() }.joinToString(" ")
+
+                                        val fallback = activeJobCard.vehicleName
+                                            .replace(Regex("(?i)Bike:|Scooter:|Car:"), "").trim()
+
+                                        Text(
+                                            text = descriptive.ifBlank { fallback },
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF64748B)
+                                        )
+                                        if (activeJobCard.vehicleKm.isNotBlank()) {
+                                            Text("Odometer: ${activeJobCard.vehicleKm} km", fontSize = 10.sp, color = Color(0xFF64748B))
+                                        }
+                                        if (activeJobCard.vehicleFuel.isNotBlank()) {
+                                            Text("Fuel: ${activeJobCard.vehicleFuel}%", fontSize = 10.sp, color = Color(0xFF64748B))
+                                        }
+                                    }
                                 }
                             }
 
@@ -6670,7 +8047,7 @@ fun InvoiceBreakdownPage(
                             Spacer(modifier = Modifier.height(8.dp)) // compact spacer
 
                             // Single + button design requested
-                            if (activeJobCard.status.uppercase() != "CLOSED") {
+                            if (canEdit) {
                                 OutlinedButton(
                                     onClick = { showAddItemDrawer = true },
                                     modifier = Modifier
@@ -6707,13 +8084,13 @@ fun InvoiceBreakdownPage(
                                     .padding(vertical = 4.dp, horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("#", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(24.dp))
+                                Text("#", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(20.dp))
                                 Text("ITEM DESCRIPTION", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.weight(1f))
-                                Text("QTY", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(36.dp), textAlign = TextAlign.Center)
-                                Text("PRICE", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(54.dp), textAlign = TextAlign.End)
-                                Text("TOTAL", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(64.dp), textAlign = TextAlign.End)
-                                if (activeJobCard.status.uppercase() != "CLOSED") {
-                                    Spacer(modifier = Modifier.width(32.dp))
+                                Text("QTY", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(30.dp), textAlign = TextAlign.Center)
+                                Text("PRICE", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(50.dp), textAlign = TextAlign.End)
+                                Text("TOTAL", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(58.dp), textAlign = TextAlign.End)
+                                if (canEdit) {
+                                    Spacer(modifier = Modifier.width(52.dp))
                                 }
                             }
 
@@ -6736,69 +8113,38 @@ fun InvoiceBreakdownPage(
                                             .padding(vertical = 4.dp, horizontal = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Text("${item.id}", fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(24.dp))
+                                        Text("${item.id}", fontSize = 11.sp, color = Color(0xFF64748B), modifier = Modifier.width(20.dp))
                                         Text(item.description, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1E293B), modifier = Modifier.weight(1f))
-                                        Text("${item.qty}", fontSize = 11.sp, color = Color(0xFF1E293B), modifier = Modifier.width(36.dp), textAlign = TextAlign.Center)
-                                        Text("₹${String.format("%.0f", item.price)}", fontSize = 11.sp, color = Color(0xFF1E293B), modifier = Modifier.width(54.dp), textAlign = TextAlign.End)
-                                        Text("₹${String.format("%.0f", item.total)}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E293B), modifier = Modifier.width(64.dp), textAlign = TextAlign.End)
+                                        Text("${item.qty}", fontSize = 11.sp, color = Color(0xFF1E293B), modifier = Modifier.width(30.dp), textAlign = TextAlign.Center)
+                                        Text("₹${String.format("%.0f", item.price)}", fontSize = 11.sp, color = Color(0xFF1E293B), modifier = Modifier.width(50.dp), textAlign = TextAlign.End)
+                                        Text("₹${String.format("%.0f", item.total)}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1E293B), modifier = Modifier.width(58.dp), textAlign = TextAlign.End)
 
-                                        if (activeJobCard.status.uppercase() != "CLOSED") {
+                                        if (canEdit) {
+                                            IconButton(
+                                                onClick = { editingRow = item },
+                                                modifier = Modifier
+                                                    .padding(start = 4.dp)
+                                                    .size(24.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "Edit item",
+                                                    tint = Color(0xFF5B4DFF),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+
                                             IconButton(
                                                 onClick = {
-                                                    if (item.isService) {
-                                                        val taskList = activeJobCard.tasks.split(",")
-                                                            .map { it.trim() }
-                                                            .filter { it.isNotBlank() }
-                                                            .toMutableList()
-                                                        val removeIdx = taskList.indexOfFirst { it == item.description }
-                                                        if (removeIdx != -1) taskList.removeAt(removeIdx)
-                                                        val finalTasks = taskList.joinToString(",")
-
-                                                        val leftoverRows = parseInvoiceItems(finalTasks, activeJobCard.materials)
-                                                        val sc = leftoverRows.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                        val pc = leftoverRows.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                        val tax = (sc + pc) * 0.18
-                                                        val totalVal = sc + pc + tax
-
-                                                        viewModel.addJobCard(
-                                                            activeJobCard.copy(
-                                                                tasks = finalTasks,
-                                                                serviceCharges = sc,
-                                                                partsCharges = pc,
-                                                                totalAmount = totalVal,
-                                                                taxes = tax
-                                                            )
-                                                        )
-                                                        Toast.makeText(context, "Removed service item", Toast.LENGTH_SHORT).show()
-                                                    } else {
-                                                        val matList = activeJobCard.materials.split(",")
-                                                            .map { it.trim() }
-                                                            .filter { it.isNotBlank() }
-                                                            .toMutableList()
-                                                        val removeIdx = matList.indexOfFirst { it.contains(item.description) }
-                                                        if (removeIdx != -1) matList.removeAt(removeIdx)
-                                                        val finalMaterials = matList.joinToString(",")
-
-                                                        val leftoverRows = parseInvoiceItems(activeJobCard.tasks, finalMaterials)
-                                                        val sc = leftoverRows.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                        val pc = leftoverRows.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                        val tax = (sc + pc) * 0.18
-                                                        val totalVal = sc + pc + tax
-
-                                                        viewModel.addJobCard(
-                                                            activeJobCard.copy(
-                                                                materials = finalMaterials,
-                                                                serviceCharges = sc,
-                                                                partsCharges = pc,
-                                                                totalAmount = totalVal,
-                                                                taxes = tax
-                                                            )
-                                                        )
-                                                        Toast.makeText(context, "Removed part item", Toast.LENGTH_SHORT).show()
-                                                    }
+                                                    removeLine(item)
+                                                    Toast.makeText(
+                                                        context,
+                                                        if (item.isService) "Removed service item" else "Removed part item",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
                                                 },
                                                 modifier = Modifier
-                                                    .padding(start = 8.dp)
+                                                    .padding(start = 4.dp)
                                                     .size(24.dp)
                                             ) {
                                                 Icon(
@@ -6831,9 +8177,54 @@ fun InvoiceBreakdownPage(
                                     Text("₹${String.format("%.2f", activeJobCard.partsCharges)}", fontSize = 12.sp, color = Color(0xFF1E293B))
                                 }
 
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("GST/Taxes (18%)", fontSize = 12.sp, color = Color(0xFF64748B))
-                                    Text("₹${String.format("%.2f", activeJobCard.taxes)}", fontSize = 12.sp, color = Color(0xFF1E293B))
+                                // GST only appears when the workshop actually charges it.
+                                if (settings.gstEnabled) {
+                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text(
+                                            "GST/Taxes (${String.format("%.0f", settings.gstRatePercent)}%)",
+                                            fontSize = 12.sp,
+                                            color = Color(0xFF64748B)
+                                        )
+                                        Text("₹${String.format("%.2f", activeJobCard.taxes)}", fontSize = 12.sp, color = Color(0xFF1E293B))
+                                    }
+                                }
+
+                                // DISCOUNT — always shown under its own heading, as a deduction.
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "DISCOUNT",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFDC2626)
+                                        )
+                                        if (canEdit) {
+                                            IconButton(
+                                                onClick = { showDiscountDialog = true },
+                                                modifier = Modifier.size(22.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Edit,
+                                                    contentDescription = "Edit discount",
+                                                    tint = Color(0xFF5B4DFF),
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = if (activeJobCard.discount > 0)
+                                            "− ₹${String.format("%.2f", activeJobCard.discount)}"
+                                        else
+                                            "− ₹0.00",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFDC2626)
+                                    )
                                 }
 
                                 Divider(color = Color(0xFFE2E8F0), modifier = Modifier.padding(vertical = 4.dp))
@@ -6923,7 +8314,7 @@ fun InvoiceBreakdownPage(
                         ) {
                             OutlinedButton(
                                 onClick = {
-                                    val pdfFile = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard)
+                                    val pdfFile = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard, clientCode)
                                     if (pdfFile != null) {
                                         com.example.util.InvoicePdfGenerator.printPdf(context, pdfFile)
                                     }
@@ -6940,7 +8331,7 @@ fun InvoiceBreakdownPage(
 
                             Button(
                                 onClick = {
-                                    val pdfFile = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard)
+                                    val pdfFile = com.example.util.InvoicePdfGenerator.generatePdfFile(context, activeJobCard, clientCode)
                                     if (pdfFile != null) {
                                         com.example.util.InvoicePdfGenerator.sharePdf(context, pdfFile, activeJobCard)
                                     }
@@ -7011,120 +8402,125 @@ fun InvoiceBreakdownPage(
                     }
                 }
             }
-        }
 
-        // --- sliding right-to-left drawer overlay ---
-        if (showAddItemDrawer) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(0.4f))
-                    .clickable { showAddItemDrawer = false }
-            )
-        }
-
-        AnimatedVisibility(
-            visible = showAddItemDrawer,
-            enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
-            exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
-            modifier = Modifier.align(Alignment.CenterEnd)
-        ) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .widthIn(max = 350.dp)
-                    .fillMaxWidth(0.85f),
-                color = Color.White,
-                shadowElevation = 16.dp
-            ) {
-                Column(
+            // --- sliding right-to-left drawer overlay, sized to the app's content area ---
+            if (showAddItemDrawer) {
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .statusBarsPadding()
-                        .padding(top = 16.dp)
+                        .background(Color.Black.copy(0.4f))
+                        .clickable { showAddItemDrawer = false }
+                )
+            }
+
+            AnimatedVisibility(
+                visible = showAddItemDrawer,
+                enter = slideInHorizontally(initialOffsetX = { it }) + fadeIn(),
+                exit = slideOutHorizontally(targetOffsetX = { it }) + fadeOut(),
+                modifier = Modifier.align(Alignment.CenterEnd)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .widthIn(max = 340.dp)
+                        .fillMaxWidth(0.85f),
+                    color = Color.White,
+                    shadowElevation = 16.dp
                 ) {
-                    // Drawer Header
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Add Item",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 18.sp,
-                            color = Color(0xFF1E293B)
-                        )
-                        IconButton(onClick = { showAddItemDrawer = false }) {
-                            Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF64748B))
-                        }
-                    }
-
-                    Divider(color = Color(0xFFE2E8F0), modifier = Modifier.padding(vertical = 12.dp))
-
-                    // Drawer Tabs
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        val tabs = listOf("Services", "Spares", "Lubes")
-                        tabs.forEach { tab ->
-                            val isSel = drawerTab == tab
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (isSel) Color(0xFF5B4DFF) else Color(0xFFF1F5F9))
-                                    .clickable { drawerTab = tab }
-                                    .padding(vertical = 8.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = tab,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSel) Color.White else Color(0xFF64748B)
-                                )
-                            }
-                        }
-                    }
-
-                    // Tab contents
                     Column(
                         modifier = Modifier
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState())
-                            .padding(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                            .fillMaxSize()
+                            .navigationBarsPadding()
+                            .padding(top = 10.dp)
                     ) {
-                        // Custom Item Input section
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF1F5F9)),
-                            border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
-                            shape = RoundedCornerShape(10.dp)
+                        // Drawer Header
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("Add Custom Item / Service", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF0F172A))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "Add Item",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp,
+                                color = Color(0xFF1E293B)
+                            )
+                            IconButton(onClick = { showAddItemDrawer = false }, modifier = Modifier.size(28.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color(0xFF64748B), modifier = Modifier.size(18.dp))
+                            }
+                        }
+
+                        Divider(color = Color(0xFFE2E8F0), modifier = Modifier.padding(vertical = 8.dp))
+
+                        // Drawer Tabs
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf("Services", "Spares", "Lubes").forEach { tab ->
+                                val isSel = drawerTab == tab
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isSel) Color(0xFF5B4DFF) else Color(0xFFF1F5F9))
+                                        .clickable { drawerTab = tab }
+                                        .padding(vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = tab,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSel) Color.White else Color(0xFF64748B)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Tab contents
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .verticalScroll(rememberScrollState())
+                                .padding(start = 12.dp, end = 12.dp, bottom = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Custom Item Input section — one compact block rather than a card
+                            // twice the height of the rows it sits above.
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFFF1F5F9))
+                                    .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(10.dp))
+                                    .padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("Custom Item", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF0F172A))
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     OutlinedTextField(
                                         value = customItemName,
                                         onValueChange = { customItemName = it },
-                                        label = { Text("Item Name", fontSize = 10.sp) },
+                                        placeholder = { Text("Name", fontSize = 11.sp) },
                                         singleLine = true,
-                                        modifier = Modifier.weight(1.2f)
+                                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(1.3f)
                                     )
                                     OutlinedTextField(
                                         value = customItemPrice,
                                         onValueChange = { customItemPrice = it },
-                                        label = { Text("Price (₹)", fontSize = 10.sp) },
+                                        placeholder = { Text("₹", fontSize = 11.sp) },
                                         singleLine = true,
                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                        modifier = Modifier.weight(0.8f)
+                                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        modifier = Modifier.weight(0.7f)
                                     )
                                 }
                                 Row(
@@ -7142,51 +8538,15 @@ fun InvoiceBreakdownPage(
                                         FilterChip(
                                             selected = !customIsService,
                                             onClick = { customIsService = false },
-                                            label = { Text("Part / Lube", fontSize = 10.sp) }
+                                            label = { Text("Part", fontSize = 10.sp) }
                                         )
                                     }
                                     Button(
                                         onClick = {
                                             val priceVal = customItemPrice.toDoubleOrNull() ?: 0.0
                                             if (customItemName.isNotBlank() && priceVal > 0) {
-                                                if (customIsService) {
-                                                    val currentTasks = activeJobCard.tasks
-                                                    val finalTasks = if (currentTasks.isBlank()) customItemName else "$currentTasks,$customItemName"
-                                                    val rowItemsCurrent = parseInvoiceItems(finalTasks, activeJobCard.materials)
-                                                    val sc = rowItemsCurrent.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                    val pc = rowItemsCurrent.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                    val tax = (sc + pc) * 0.18
-                                                    val totalVal = sc + pc + tax
-
-                                                    viewModel.addJobCard(
-                                                        activeJobCard.copy(
-                                                            tasks = finalTasks,
-                                                            serviceCharges = sc,
-                                                            partsCharges = pc,
-                                                            totalAmount = totalVal,
-                                                            taxes = tax
-                                                        )
-                                                    )
-                                                } else {
-                                                    val addedPart = "$customItemName (1) - ₹${String.format("%.0f", priceVal)}"
-                                                    val currentMaterials = activeJobCard.materials
-                                                    val finalMaterials = if (currentMaterials.isBlank()) addedPart else "$currentMaterials,$addedPart"
-                                                    val rowItemsCurrent = parseInvoiceItems(activeJobCard.tasks, finalMaterials)
-                                                    val sc = rowItemsCurrent.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                    val pc = rowItemsCurrent.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                    val tax = (sc + pc) * 0.18
-                                                    val totalVal = sc + pc + tax
-
-                                                    viewModel.addJobCard(
-                                                        activeJobCard.copy(
-                                                            materials = finalMaterials,
-                                                            serviceCharges = sc,
-                                                            partsCharges = pc,
-                                                            totalAmount = totalVal,
-                                                            taxes = tax
-                                                        )
-                                                    )
-                                                }
+                                                // A hand-typed item is not stock, so nothing is deducted for it.
+                                                addLine(customItemName.trim(), 1, priceVal, customIsService, fromStock = false)
                                                 Toast.makeText(context, "Added: $customItemName", Toast.LENGTH_SHORT).show()
                                                 customItemName = ""
                                                 customItemPrice = ""
@@ -7195,222 +8555,184 @@ fun InvoiceBreakdownPage(
                                             }
                                         },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                                        modifier = Modifier.height(34.dp)
+                                        contentPadding = PaddingValues(horizontal = 14.dp),
+                                        modifier = Modifier.height(30.dp)
                                     ) {
                                         Text("Add", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                     }
                                 }
                             }
-                        }
 
-                        when (drawerTab) {
-                            "Services" -> {
-                                Text("Standard Services", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFF475569))
+                            val accent = when (drawerTab) {
+                                "Spares" -> Color(0xFFF97316)
+                                "Lubes" -> Color(0xFF10B981)
+                                else -> Color(0xFF5B4DFF)
+                            }
+                            val stockRows = stockFor(if (drawerTab == "Services") "Service" else drawerTab.dropLast(1))
 
-                                servicesList.forEach { service ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFFF8FAFC))
-                                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                            .padding(10.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(service.title, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
-                                            Text("Price: ₹${String.format("%.0f", service.price)}", fontSize = 11.sp, color = Color(0xFF64748B))
+                            if (drawerTab == "Services") {
+                                Text("Standard Services", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = Color(0xFF475569))
+                                servicesCatalogue.forEach { service ->
+                                    var qtyChoice by remember(service.title) { mutableIntStateOf(1) }
+                                    DrawerCatalogueRow(
+                                        title = service.title,
+                                        price = service.price,
+                                        stockOnHand = null,
+                                        blocked = false,
+                                        accent = accent,
+                                        qty = qtyChoice,
+                                        onQtyChange = { qtyChoice = it },
+                                        onAdd = {
+                                            addLine(service.title, qtyChoice, service.price, isService = true, fromStock = false)
+                                            Toast.makeText(context, "Added Service: ${service.title}", Toast.LENGTH_SHORT).show()
                                         }
-                                        IconButton(
-                                            onClick = {
-                                                val currentTasks = if (activeJobCard.tasks.isBlank()) "" else activeJobCard.tasks
-                                                val finalTasks = if (currentTasks.isBlank()) service.title else "$currentTasks,${service.title}"
-                                                
-                                                val rowItemsCurrent = parseInvoiceItems(finalTasks, activeJobCard.materials)
-                                                val sc = rowItemsCurrent.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val pc = rowItemsCurrent.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val tax = (sc + pc) * 0.18
-                                                val totalVal = sc + pc + tax
-
-                                                viewModel.addJobCard(
-                                                    activeJobCard.copy(
-                                                        tasks = finalTasks,
-                                                        serviceCharges = sc,
-                                                        partsCharges = pc,
-                                                        totalAmount = totalVal,
-                                                        taxes = tax
-                                                    )
-                                                )
-                                                Toast.makeText(context, "Added Service: ${service.title}", Toast.LENGTH_SHORT).show()
-                                            },
-                                            modifier = Modifier
-                                                .size(28.dp)
-                                                .clip(RoundedCornerShape(50))
-                                                .background(Color(0xFF5B4DFF))
-                                        ) {
-                                            Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.White, modifier = Modifier.size(14.dp))
-                                        }
-                                    }
+                                    )
                                 }
                             }
-                            "Spares" -> {
-                                sparesList.forEach { spare ->
-                                    var qtyChoice by remember(spare.title) { mutableStateOf(1) }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFFF8FAFC))
-                                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                            .padding(10.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(spare.title, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
-                                            Text("Price: ₹${String.format("%.0f", spare.price)} • stock: ${spare.stock ?: 0}", fontSize = 11.sp, color = Color(0xFF64748B))
 
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Qty: ", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
-                                                IconButton(
-                                                    onClick = { if (qtyChoice > 1) qtyChoice-- },
-                                                    modifier = Modifier.size(24.dp)
-                                                ) {
-                                                    Text("-", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                }
-                                                Text("$qtyChoice", fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                                IconButton(
-                                                    onClick = { qtyChoice++ },
-                                                    modifier = Modifier.size(24.dp)
-                                                ) {
-                                                    Text("+", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                }
+                            Text(
+                                text = "From Stock (${drawerTab})",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = Color(0xFF475569),
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+
+                            if (stockRows.isEmpty()) {
+                                Text(
+                                    text = "Nothing of this type in the stock list yet. Add it under Stock first.",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8),
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            } else {
+                                stockRows.forEach { stockItem ->
+                                    var qtyChoice by remember(stockItem.id) { mutableIntStateOf(1) }
+                                    // With validation on, a line the shelf cannot cover cannot be added.
+                                    val blocked = settings.stockValidationEnabled && stockItem.quantity < qtyChoice
+                                    DrawerCatalogueRow(
+                                        title = stockItem.name,
+                                        price = stockItem.unitPrice,
+                                        stockOnHand = stockItem.quantity,
+                                        blocked = blocked,
+                                        accent = accent,
+                                        qty = qtyChoice,
+                                        onQtyChange = { qtyChoice = it },
+                                        onAdd = {
+                                            val added = addLine(
+                                                stockItem.name,
+                                                qtyChoice,
+                                                stockItem.unitPrice,
+                                                isService = stockItem.stockType.equals("Service", ignoreCase = true),
+                                                fromStock = true
+                                            )
+                                            if (added) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Added ${stockItem.name} • stock now ${(stockItem.quantity - qtyChoice).coerceAtLeast(0)}",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
                                             }
                                         }
-                                        IconButton(
-                                            onClick = {
-                                                val addedPart = "${spare.title} ($qtyChoice) - ₹${String.format("%.0f", qtyChoice * spare.price)}"
-                                                val currentMaterials = if (activeJobCard.materials.isBlank()) "" else activeJobCard.materials
-                                                val finalMaterials = if (currentMaterials.isBlank()) addedPart else "$currentMaterials,$addedPart"
-
-                                                val rowItemsCurrent = parseInvoiceItems(activeJobCard.tasks, finalMaterials)
-                                                val sc = rowItemsCurrent.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val pc = rowItemsCurrent.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val tax = (sc + pc) * 0.18
-                                                val totalVal = sc + pc + tax
-
-                                                viewModel.addJobCard(
-                                                    activeJobCard.copy(
-                                                        materials = finalMaterials,
-                                                        serviceCharges = sc,
-                                                        partsCharges = pc,
-                                                        totalAmount = totalVal,
-                                                        taxes = tax
-                                                    )
-                                                )
-                                                Toast.makeText(context, "Added part: ${spare.title}", Toast.LENGTH_SHORT).show()
-                                            },
-                                            modifier = Modifier
-                                                .size(28.dp)
-                                                .clip(RoundedCornerShape(50))
-                                                .background(Color(0xFFF97316))
-                                        ) {
-                                            Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.White, modifier = Modifier.size(14.dp))
-                                        }
-                                    }
-                                }
-                            }
-                            "Lubes" -> {
-                                lubesList.forEach { lube ->
-                                    var qtyChoice by remember(lube.title) { mutableStateOf(1) }
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color(0xFFF8FAFC))
-                                            .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                            .padding(10.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(lube.title, fontWeight = FontWeight.Bold, fontSize = 13.sp, color = Color(0xFF1E293B))
-                                            Text("Price: ₹${String.format("%.0f", lube.price)} • stock: ${lube.stock ?: 0}", fontSize = 11.sp, color = Color(0xFF64748B))
-
-                                            Spacer(modifier = Modifier.height(4.dp))
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Text("Qty: ", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF64748B))
-                                                IconButton(
-                                                    onClick = { if (qtyChoice > 1) qtyChoice-- },
-                                                    modifier = Modifier.size(24.dp)
-                                                ) {
-                                                    Text("-", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                }
-                                                Text("$qtyChoice", fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
-                                                IconButton(
-                                                    onClick = { qtyChoice++ },
-                                                    modifier = Modifier.size(24.dp)
-                                                ) {
-                                                    Text("+", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                }
-                                            }
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                val addedLube = "${lube.title} ($qtyChoice) - ₹${String.format("%.0f", qtyChoice * lube.price)}"
-                                                val currentMaterials = if (activeJobCard.materials.isBlank()) "" else activeJobCard.materials
-                                                val finalMaterials = if (currentMaterials.isBlank()) addedLube else "$currentMaterials,$addedLube"
-
-                                                val rowItemsCurrent = parseInvoiceItems(activeJobCard.tasks, finalMaterials)
-                                                val sc = rowItemsCurrent.filter { itemRow -> itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val pc = rowItemsCurrent.filter { itemRow -> !itemRow.isService }.sumOf { itemRow -> itemRow.total }
-                                                val tax = (sc + pc) * 0.18
-                                                val totalVal = sc + pc + tax
-
-                                                viewModel.addJobCard(
-                                                    activeJobCard.copy(
-                                                        materials = finalMaterials,
-                                                        serviceCharges = sc,
-                                                        partsCharges = pc,
-                                                        totalAmount = totalVal,
-                                                        taxes = tax
-                                                    )
-                                                )
-                                                Toast.makeText(context, "Added lube: ${lube.title}", Toast.LENGTH_SHORT).show()
-                                            },
-                                            modifier = Modifier
-                                                .size(28.dp)
-                                                .clip(RoundedCornerShape(50))
-                                                .background(Color(0xFF10B981))
-                                        ) {
-                                            Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.White, modifier = Modifier.size(14.dp))
-                                        }
-                                    }
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
+            }
         }
+    }
+
+    // --- Per-line editing popup ---
+    editingRow?.let { row ->
+        EditInvoiceItemDialog(
+            item = row,
+            stockOnHand = stockRowFor(row.description)?.quantity,
+            onDismiss = { editingRow = null },
+            onSave = { description, qty, price, isService ->
+                // A refused edit leaves the popup open with the entered values intact.
+                if (updateLine(row, description, qty, price, isService)) {
+                    editingRow = null
+                    Toast.makeText(context, "Updated $description", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    // --- Discount popup ---
+    if (showDiscountDialog) {
+        val gross = activeJobCard.serviceCharges + activeJobCard.partsCharges + activeJobCard.taxes
+        EditDiscountDialog(
+            currentDiscount = activeJobCard.discount,
+            grossAmount = gross,
+            onDismiss = { showDiscountDialog = false },
+            onSave = { discount ->
+                persist(recalculatedJob(activeJobCard, discount = discount))
+                showDiscountDialog = false
+            }
+        )
+    }
+
+    // --- Vehicle details popup ---
+    if (showVehicleDialog) {
+        EditVehicleDetailsDialog(
+            job = activeJobCard,
+            onDismiss = { showVehicleDialog = false },
+            onSave = { updated ->
+                persist(updated)
+                showVehicleDialog = false
+                Toast.makeText(context, "Vehicle details updated", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    // --- Reopening a closed bill is a deliberate act, so it is confirmed ---
+    if (showReopenConfirm) {
+        AlertDialog(
+            onDismissRequest = { showReopenConfirm = false },
+            title = { Text("Edit closed bill?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "This invoice has already been paid and closed. Any change you make now will " +
+                        "alter the closed bill and its printed total. The cash entry already " +
+                        "recorded for it is not adjusted automatically.",
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    closedBillUnlocked = true
+                    showReopenConfirm = false
+                }) {
+                    Text("Unlock for editing", fontWeight = FontWeight.Bold, color = Color(0xFF5B4DFF))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReopenConfirm = false }) {
+                    Text("Cancel", color = Color(0xFF64748B))
+                }
+            }
+        )
     }
 
     // --- Receive Payment and close Popup ---
     if (showPaymentSelector) {
         ReceivePaymentDialog(
-            totalBill = activeJobCard.totalAmount,
+            totalBill = activeJobCard.serviceCharges + activeJobCard.partsCharges + activeJobCard.taxes,
+            existingDiscount = activeJobCard.discount,
             onDismiss = { showPaymentSelector = false },
-            onPaymentConfirmed = { netReceived, mode ->
+            onPaymentConfirmed = { netReceived, discount, mode ->
                 showPaymentSelector = false
                 // Deliberately do NOT dismiss: the worksheet stays open and re-reads the job as
                 // CLOSED, so the primary button becomes "Share SMS Invoice" and the owner can
                 // send it to the customer immediately. Back returns to the Closed list.
                 onPaidAndClosed()
 
-                // 1. Move status to CLOSED
-                viewModel.updateJobCardStatus(activeJobCard, "CLOSED")
+                // 1. Record the discount on the bill and move status to CLOSED in one write, so
+                //    the invoice the customer keeps shows the same deduction that was charged.
+                persist(recalculatedJob(activeJobCard, discount = discount).copy(status = "CLOSED"))
 
                 // 2. Append ledger transaction
                 viewModel.addCashItem(
@@ -8469,6 +9791,24 @@ fun CustomerProfileCard(
                     Column {
                         Text(profile.name, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = DarkSlate)
                         Text("${profile.phone} • ${profile.email}", fontSize = 11.sp, color = Color.Gray)
+                        // The client's own code — printed on their invoice, so it has to be
+                        // readable here too when someone quotes it over the phone.
+                        if (profile.clientId.isNotBlank()) {
+                            Surface(
+                                color = Color(0xFFEEF2FF),
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.padding(top = 3.dp)
+                            ) {
+                                Text(
+                                    text = "ID ${profile.clientId}",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = Color(0xFF4F46E5)
+                                )
+                            }
+                        }
                     }
                 }
 

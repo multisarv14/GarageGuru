@@ -7,6 +7,7 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.StockIssueEntity
 import com.example.data.model.TeamMemberEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -45,6 +46,19 @@ interface GarageDao {
 
     @Query("DELETE FROM inventory WHERE id = :id")
     suspend fun deleteInventoryItemById(id: Int)
+
+    // --- Stock Issues (withdrawals from the stock room) ---
+    @Query("SELECT * FROM stock_issues ORDER BY timestamp DESC")
+    fun getAllStockIssues(): Flow<List<StockIssueEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertStockIssue(issue: StockIssueEntity): Long
+
+    @Query("DELETE FROM stock_issues WHERE id = :id")
+    suspend fun deleteStockIssueById(id: Int)
+
+    @Query("DELETE FROM stock_issues")
+    suspend fun clearStockIssues()
 
     // --- Service Plan Memberships ---
     @Query("SELECT * FROM service_memberships ORDER BY customerName ASC")
@@ -112,6 +126,6 @@ interface GarageDao {
     @Query("DELETE FROM service_alerts")
     suspend fun clearServiceAlerts()
 
-    @Query("DELETE FROM sqlite_sequence WHERE name IN ('job_cards','cash_ledger','inventory','service_memberships','customer_profiles','service_alerts')")
+    @Query("DELETE FROM sqlite_sequence WHERE name IN ('job_cards','cash_ledger','inventory','service_memberships','customer_profiles','service_alerts','stock_issues')")
     suspend fun resetAutoIncrement()
 }

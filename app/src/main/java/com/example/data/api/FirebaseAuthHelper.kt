@@ -80,6 +80,7 @@ object FirebaseAuthHelper {
     fun signOut() {
         auth.signOut()
         GarageSession.clear()
+        GarageSettings.clear()
         GarageLogoStore.clear()
     }
 
@@ -108,23 +109,32 @@ object FirebaseAuthHelper {
                 }
 
                 val garageId = GarageSession.garageIdFor(uid)
+                // Every workshop gets a printable Client ID of its own the moment it registers,
+                // and is filed against the app operator's address so support can find it.
+                val clientId = GarageSettings.clientIdFor(uid)
 
                 val garageDoc = hashMapOf(
                     "id" to garageId,
+                    "clientId" to clientId,
                     "name" to garageName,
                     "ownerUid" to uid,
                     "ownerName" to ownerName,
                     "ownerEmail" to email,
                     "contactEmail" to contactEmail,
+                    "appAdminEmail" to GarageSettings.APP_ADMIN_EMAIL,
                     "phone" to phone,
                     "address" to city,
                     "city" to city,
                     "state" to "",
                     "country" to "India",
                     "gstNumber" to "",
+                    "gstEnabled" to true,
                     "currency" to "INR",
                     "currencySymbol" to "₹",
                     "taxRatePercent" to 18,
+                    "stockValidationEnabled" to true,
+                    "showVehicleOnInvoice" to true,
+                    "setupCompleted" to false,
                     "timezone" to "Asia/Kolkata",
                     "workingHours" to "09:00 - 20:00",
                     "active" to true,
@@ -134,9 +144,11 @@ object FirebaseAuthHelper {
 
                 val adminDoc = hashMapOf(
                     "uid" to uid,
+                    "clientId" to clientId,
                     "name" to ownerName,
                     "email" to email,
                     "contactEmail" to contactEmail,
+                    "appAdminEmail" to GarageSettings.APP_ADMIN_EMAIL,
                     "phone" to phone,
                     "garageId" to garageId,
                     "role" to "Owner",
@@ -152,29 +164,34 @@ object FirebaseAuthHelper {
                 val batch = db.batch()
                 batch.set(db.collection("garages").document(garageId), garageDoc, SetOptions.merge())
                 batch.set(db.collection("admin").document(uid), adminDoc, SetOptions.merge())
+                fun openLocalSession() {
+                    GarageSession.update(
+                        uid = uid,
+                        garageId = garageId,
+                        garageName = garageName,
+                        ownerName = ownerName,
+                        ownerPhone = phone,
+                        ownerEmail = email
+                    )
+                    // A fresh workshop has not been through the setup wizard yet, so the owner
+                    // is walked through address/GST/stock rules on first entry.
+                    GarageSettings.update(
+                        clientId = clientId,
+                        address = city,
+                        setupCompleted = false,
+                        syncToCloud = false
+                    )
+                }
+
                 batch.commit()
                     .addOnSuccessListener {
-                        GarageSession.update(
-                            uid = uid,
-                            garageId = garageId,
-                            garageName = garageName,
-                            ownerName = ownerName,
-                            ownerPhone = phone,
-                            ownerEmail = email
-                        )
+                        openLocalSession()
                         callback(true, "Signed up and registered garage")
                     }
                     .addOnFailureListener { e ->
                         Log.e(TAG, "Failed writing garage/admin docs", e)
                         // The auth account exists, so keep the user moving with a local session.
-                        GarageSession.update(
-                            uid = uid,
-                            garageId = garageId,
-                            garageName = garageName,
-                            ownerName = ownerName,
-                            ownerPhone = phone,
-                            ownerEmail = email
-                        )
+                        openLocalSession()
                         callback(false, "Signed up but failed to register garage: ${e.message}")
                     }
             }
@@ -249,8 +266,10 @@ object FirebaseAuthHelper {
                     db.collection("admin").document(uid).set(
                         hashMapOf(
                             "uid" to uid,
+                            "clientId" to GarageSettings.clientIdFor(uid),
                             "name" to ownerName,
                             "email" to ownerEmail,
+                            "appAdminEmail" to GarageSettings.APP_ADMIN_EMAIL,
                             "phone" to ownerPhone,
                             "garageId" to garageId,
                             "role" to "Owner",
@@ -271,14 +290,31 @@ object FirebaseAuthHelper {
                         val garageName = garageSnap.getString("name")?.takeIf { it.isNotBlank() }
                             ?: "Garage Guru"
                         GarageSession.logoUpdatedAt = garageSnap.getLong("logoUpdatedAt") ?: 0L
+
+                        // Billing and stock preferences travel with the workshop, so a reinstall
+                        // or a second device bills exactly like the first one did.
+                        GarageSettings.applyFromCloud(
+                            clientId = garageSnap.getString("clientId")
+                                ?.takeIf { it.isNotBlank() } ?: GarageSettings.clientIdFor(uid),
+                            address = garageSnap.getString("address"),
+                            gstin = garageSnap.getString("gstNumber"),
+                            gstEnabled = garageSnap.getBoolean("gstEnabled"),
+                            gstRatePercent = (garageSnap.get("taxRatePercent") as? Number)?.toDouble(),
+                            stockValidationEnabled = garageSnap.getBoolean("stockValidationEnabled"),
+                            showVehicleOnInvoice = garageSnap.getBoolean("showVehicleOnInvoice"),
+                            setupCompleted = garageSnap.getBoolean("setupCompleted")
+                        )
+
                         if (!garageSnap.exists()) {
                             db.collection("garages").document(garageId).set(
                                 hashMapOf(
                                     "id" to garageId,
+                                    "clientId" to GarageSettings.current.clientId,
                                     "name" to garageName,
                                     "ownerUid" to uid,
                                     "ownerName" to ownerName,
                                     "ownerEmail" to ownerEmail,
+                                    "appAdminEmail" to GarageSettings.APP_ADMIN_EMAIL,
                                     "phone" to ownerPhone,
                                     "currency" to "INR",
                                     "currencySymbol" to "₹",

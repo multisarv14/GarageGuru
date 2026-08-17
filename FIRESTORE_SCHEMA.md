@@ -36,6 +36,8 @@ inventoryItems/{garageId}_{id}
 memberships/{garageId}_{id}
 customers/{garageId}_{id}
 serviceAlerts/{garageId}_{id}
+teamMembers/{garageId}_{id}
+stockIssues/{garageId}_{id}
 ```
 
 New workshops get `garageId = "garage_{uid}"`. The original workshop in this project keeps its
@@ -67,10 +69,16 @@ Document id is the Firebase Auth uid. Read on every sign in to discover `garageI
 | `id` | String | Matches the document id. |
 | `name` | String | Shown in the app's top bar. |
 | `ownerUid` / `ownerName` / `ownerEmail` / `phone` | String | |
-| `address` / `city` / `state` / `country` | String | `city` comes from the sign-up form. |
-| `gstNumber` | String | |
+| `clientId` | String | Printable workshop code, `GG-XXXX-XXXX`. Derived from the uid by `GarageSettings.clientIdFor`, so a reinstall recomputes the same id rather than minting a second one. |
+| `appAdminEmail` | String | The app operator every registered workshop is filed against (`ceomultisarv@gmail.com`). |
+| `address` / `city` / `state` / `country` | String | `city` comes from the sign-up form; `address` is edited from the profile screen and heads every printed invoice. |
+| `gstNumber` | String | GSTIN. Printed on invoices when `gstEnabled`. |
+| `gstEnabled` | Boolean | When false no tax line is added to a bill at all. |
 | `currency` / `currencySymbol` | String | `INR` / `₹` for new workshops. |
-| `taxRatePercent` | Number | |
+| `taxRatePercent` | Number | GST rate applied to new and edited bills. |
+| `stockValidationEnabled` | Boolean | When true an item cannot be billed unless stock covers it. |
+| `showVehicleOnInvoice` | Boolean | Whether make/model/odometer/fuel are printed. |
+| `setupCompleted` | Boolean | Drives the first-run setup wizard; set once the owner finishes or skips it. |
 | `timezone` / `workingHours` | String | |
 | `active` | Boolean | |
 | `logoUpdatedAt` | Number | Epoch millis marker; `0`/absent means no logo. Lets a cold start tell whether the cached logo is stale without downloading it. |
@@ -112,10 +120,14 @@ blobs do not scale to that.
 
 `garageId`, `id`, `customerName`, `customerPhone`, `vehicleName`, `vehiclePlate`, `symptoms`,
 `diagnosis`, `status`, `tasks`, `materials`, `serviceCharges`, `partsCharges`, `taxes`,
-`totalAmount`, `creationTime`, `updatedAt`
+`discount`, `totalAmount`, `vehicleMake`, `vehicleModel`, `vehicleVariant`, `vehicleKm`,
+`vehicleFuel`, `creationTime`, `updatedAt`
 
-`status` moves `ESTIMATE → OPEN → COMPLETED → CLOSED`. `tasks` and `materials` are
-comma-separated strings, mirroring the Room columns. `creationTime` is epoch millis (Number);
+`status` moves `ESTIMATE → OPEN → COMPLETED → CLOSED`. `totalAmount` is
+`serviceCharges + partsCharges + taxes - discount`. `tasks` and `materials` are
+comma-separated strings, mirroring the Room columns. Each entry is
+`Name (qty) @ ₹unitPrice`; entries written by earlier versions use `Name (qty) - ₹lineTotal`
+and are still read correctly. `creationTime` is epoch millis (Number);
 `updatedAt` is a server Timestamp stamped by the sync layer.
 
 ### `cashItems/{garageId}_{id}`
@@ -125,9 +137,19 @@ comma-separated strings, mirroring the Room columns. `creationTime` is epoch mil
 
 ### `inventoryItems/{garageId}_{id}`
 
-`garageId`, `id`, `name`, `quantity`, `minStockAlert`, `unitPrice`, `updatedAt`
+`garageId`, `id`, `name`, `stockType` (`Service`/`Spare`/`Lube`), `quantity`, `minStockAlert`,
+`unitPrice`, `updatedAt`
 
-An item is low stock when `quantity <= minStockAlert`.
+An item is low stock when `quantity <= minStockAlert`. `quantity` is decremented automatically
+when the item is billed on an invoice or issued from the stock screen.
+
+### `stockIssues/{garageId}_{id}`
+
+`garageId`, `id`, `inventoryItemId`, `itemName`, `quantity`, `unitPrice`, `issuedTo`,
+`jobCardId`, `reason`, `timestamp`, `updatedAt`
+
+The audit trail behind every drop in an inventory `quantity`. `jobCardId` is `0` for a counter
+sale or internal use.
 
 ### `memberships/{garageId}_{id}`
 
@@ -136,8 +158,11 @@ An item is low stock when `quantity <= minStockAlert`.
 
 ### `customers/{garageId}_{id}`
 
-`garageId`, `id`, `name`, `phone`, `email`, `vehicleName`, `vehiclePlate`, `address`, `notes`,
-`creationTime`, `updatedAt`
+`garageId`, `id`, `clientId`, `name`, `phone`, `email`, `vehicleName`, `vehiclePlate`,
+`address`, `notes`, `creationTime`, `updatedAt`
+
+`clientId` is a `CL-0007` style code minted from the Room row id when the profile is first
+saved, shown on the client card and printed on their invoices.
 
 ### `serviceAlerts/{garageId}_{id}`
 
@@ -178,7 +203,7 @@ synchronously before the network responds.
 
 ## 5. Indexes
 
-18 composite indexes are deployed (`firestore.indexes.json`). Each collection has a
+20 composite indexes are deployed (`firestore.indexes.json`). Each collection has a
 `garageId`-leading index for tenant-scoped reads, plus the original reporting indexes:
 
 | Collection | Indexed fields |
@@ -189,6 +214,7 @@ synchronously before the network responds.
 | `memberships` | `garageId + customerName` · `pendingBalance + renewalDate` |
 | `customers` | `garageId + name` · `phone + creationTime` |
 | `serviceAlerts` | `garageId + dueTimestamp` · `status + dueTimestamp` · `customerPhone + dueTimestamp` |
+| `stockIssues` | `garageId + timestamp` · `garageId + inventoryItemId + timestamp` |
 
 The app's own pull uses a single equality filter, which Firestore serves from the automatic
 single-field index — the composite indexes above are for reporting and sorted queries.
@@ -201,7 +227,7 @@ See `firestore.rules`. The shape:
 
 - `admin/{uid}` — any signed-in user may read; only the owner of that uid may write it.
 - `garages/{garageId}/**` — signed-in read/write.
-- All six business collections — signed-in read; writes must carry a non-empty `garageId`
+- All eight business collections — signed-in read; writes must carry a non-empty `garageId`
   string, so an untagged document can never be created. Deletes are allowed for signed-in
   callers (a delete carries no `request.resource`).
 

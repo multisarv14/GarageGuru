@@ -91,6 +91,23 @@
       ]
     },
     {
+      "collectionGroup": "stockIssues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "garageId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "stockIssues",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "garageId", "order": "ASCENDING" },
+        { "fieldPath": "inventoryItemId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "memberships",
       "queryScope": "COLLECTION",
       "fields": [
