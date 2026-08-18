@@ -17,8 +17,8 @@ android {
     applicationId = "com.multisarv.garageguru"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "2.4"
+    versionCode = 9
+    versionName = "2.6.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -84,6 +84,9 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   implementation("com.google.firebase:firebase-firestore")
   implementation("com.google.firebase:firebase-auth")
+  // Password reset by OTP finishes in a Cloud Function: only the Admin SDK can set a password
+  // on an account the caller is not signed in as.
+  implementation("com.google.firebase:firebase-functions")
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.compose.material.icons.core)

@@ -7,7 +7,9 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.RoleEntity
 import com.example.data.model.StockIssueEntity
+import com.example.data.model.TeamEntity
 import com.example.data.model.TeamMemberEntity
 import com.google.android.gms.tasks.Task
 import com.google.firebase.firestore.FieldValue
@@ -37,6 +39,8 @@ object FirebaseSyncHelper {
     const val SERVICE_ALERTS = "serviceAlerts"
     const val TEAM_MEMBERS = "teamMembers"
     const val STOCK_ISSUES = "stockIssues"
+    const val TEAMS = "teams"
+    const val ROLES = "roles"
 
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
@@ -81,6 +85,7 @@ object FirebaseSyncHelper {
     // --- Job Cards ---
     fun saveJobCard(job: JobCardEntity) = write(JOB_CARDS, job.id, hashMapOf(
         "id" to job.id,
+        "invoiceNumber" to job.invoiceNumber,
         "customerName" to job.customerName,
         "customerPhone" to job.customerPhone,
         "vehicleName" to job.vehicleName,
@@ -95,11 +100,16 @@ object FirebaseSyncHelper {
         "taxes" to job.taxes,
         "discount" to job.discount,
         "totalAmount" to job.totalAmount,
+        "vehicleType" to job.vehicleType,
         "vehicleMake" to job.vehicleMake,
         "vehicleModel" to job.vehicleModel,
         "vehicleVariant" to job.vehicleVariant,
         "vehicleKm" to job.vehicleKm,
         "vehicleFuel" to job.vehicleFuel,
+        "customerSerial" to job.customerSerial,
+        "mechanicName" to job.mechanicName,
+        "expectedDelivery" to job.expectedDelivery,
+        "customerRemarks" to job.customerRemarks,
         "creationTime" to job.creationTime
     ))
 
@@ -123,7 +133,12 @@ object FirebaseSyncHelper {
         "id" to item.id,
         "name" to item.name,
         "stockType" to item.stockType,
+        "vehicleCategory" to item.vehicleCategory,
+        "companyName" to item.companyName,
+        "partCode" to item.partCode,
         "quantity" to item.quantity,
+        "unit" to item.unit,
+        "purchasePrice" to item.purchasePrice,
         "minStockAlert" to item.minStockAlert,
         "unitPrice" to item.unitPrice
     ))
@@ -183,9 +198,33 @@ object FirebaseSyncHelper {
         "name" to member.name,
         "role" to member.role,
         "phone" to member.phone,
-        "username" to member.username,
         "password" to member.password,
-        "isOwner" to member.isOwner
+        "isOwner" to member.isOwner,
+        "teamId" to member.teamId,
+        "roleId" to member.roleId,
+        "isActive" to member.isActive,
+        "authUid" to member.authUid,
+        "email" to member.email,
+        "creationTime" to member.creationTime
+    ))
+
+    // --- Teams ---
+    fun saveTeam(team: TeamEntity) = write(TEAMS, team.id, hashMapOf(
+        "id" to team.id,
+        "name" to team.name,
+        "description" to team.description,
+        "isActive" to team.isActive,
+        "creationTime" to team.creationTime
+    ))
+
+    // --- Roles ---
+    fun saveRole(role: RoleEntity) = write(ROLES, role.id, hashMapOf(
+        "id" to role.id,
+        "name" to role.name,
+        "description" to role.description,
+        "permissionsJson" to role.permissionsJson,
+        "isSystem" to role.isSystem,
+        "creationTime" to role.creationTime
     ))
 
     fun deleteTeamMember(id: Int) = remove(TEAM_MEMBERS, id)
@@ -218,17 +257,19 @@ object FirebaseSyncHelper {
         val customers: List<CustomerProfileEntity> = emptyList(),
         val serviceAlerts: List<ServiceAlertEntity> = emptyList(),
         val teamMembers: List<TeamMemberEntity> = emptyList(),
-        val stockIssues: List<StockIssueEntity> = emptyList()
+        val stockIssues: List<StockIssueEntity> = emptyList(),
+        val teams: List<TeamEntity> = emptyList(),
+        val roles: List<RoleEntity> = emptyList()
     ) {
         val isEmpty: Boolean
             get() = jobCards.isEmpty() && cashItems.isEmpty() && inventoryItems.isEmpty() &&
                 memberships.isEmpty() && customers.isEmpty() && serviceAlerts.isEmpty() &&
-                teamMembers.isEmpty() && stockIssues.isEmpty()
+                teamMembers.isEmpty() && stockIssues.isEmpty() && teams.isEmpty() && roles.isEmpty()
 
         val total: Int
             get() = jobCards.size + cashItems.size + inventoryItems.size +
                 memberships.size + customers.size + serviceAlerts.size + teamMembers.size +
-                stockIssues.size
+                stockIssues.size + teams.size + roles.size
     }
 
     private suspend fun <T> Task<T>.awaitResult(): T = suspendCancellableCoroutine { cont ->
@@ -266,6 +307,7 @@ object FirebaseSyncHelper {
         val jobs = fetch(JOB_CARDS).map {
             JobCardEntity(
                 id = it.int("id"),
+                invoiceNumber = it.str("invoiceNumber"),
                 customerName = it.str("customerName"),
                 customerPhone = it.str("customerPhone"),
                 vehicleName = it.str("vehicleName"),
@@ -280,11 +322,16 @@ object FirebaseSyncHelper {
                 taxes = it.dbl("taxes"),
                 discount = it.dbl("discount"),
                 totalAmount = it.dbl("totalAmount"),
+                vehicleType = it.str("vehicleType"),
                 vehicleMake = it.str("vehicleMake"),
                 vehicleModel = it.str("vehicleModel"),
                 vehicleVariant = it.str("vehicleVariant"),
                 vehicleKm = it.str("vehicleKm"),
                 vehicleFuel = it.str("vehicleFuel"),
+                customerSerial = it.str("customerSerial"),
+                mechanicName = it.str("mechanicName"),
+                expectedDelivery = it.long("expectedDelivery"),
+                customerRemarks = it.str("customerRemarks"),
                 creationTime = it.long("creationTime", System.currentTimeMillis())
             )
         }.filter { it.id > 0 }
@@ -306,7 +353,12 @@ object FirebaseSyncHelper {
                 id = it.int("id"),
                 name = it.str("name"),
                 stockType = it.str("stockType", "Spare"),
+                vehicleCategory = it.str("vehicleCategory", "BOTH"),
+                companyName = it.str("companyName"),
+                partCode = it.str("partCode"),
                 quantity = it.int("quantity"),
+                unit = it.str("unit"),
+                purchasePrice = it.dbl("purchasePrice"),
                 minStockAlert = it.int("minStockAlert", 3),
                 unitPrice = it.dbl("unitPrice")
             )
@@ -362,9 +414,14 @@ object FirebaseSyncHelper {
                 name = it.str("name"),
                 role = it.str("role", "Technician"),
                 phone = it.str("phone"),
-                username = it.str("username"),
                 password = it.str("password"),
-                isOwner = (it["isOwner"] as? Boolean) ?: false
+                isOwner = (it["isOwner"] as? Boolean) ?: false,
+                teamId = it.int("teamId"),
+                roleId = it.int("roleId"),
+                isActive = (it["isActive"] as? Boolean) ?: true,
+                authUid = it.str("authUid"),
+                email = it.str("email"),
+                creationTime = it.long("creationTime", System.currentTimeMillis())
             )
         }.filter { it.id > 0 && it.name.isNotBlank() }
 
@@ -382,7 +439,28 @@ object FirebaseSyncHelper {
             )
         }.filter { it.id > 0 && it.itemName.isNotBlank() }
 
-        return CloudSnapshot(jobs, cash, inventory, memberships, customers, alerts, team, issues)
+        val teams = fetch(TEAMS).map {
+            TeamEntity(
+                id = it.int("id"),
+                name = it.str("name"),
+                description = it.str("description"),
+                isActive = (it["isActive"] as? Boolean) ?: true,
+                creationTime = it.long("creationTime", System.currentTimeMillis())
+            )
+        }.filter { it.id > 0 && it.name.isNotBlank() }
+
+        val roles = fetch(ROLES).map {
+            RoleEntity(
+                id = it.int("id"),
+                name = it.str("name"),
+                description = it.str("description"),
+                permissionsJson = it.str("permissionsJson"),
+                isSystem = (it["isSystem"] as? Boolean) ?: false,
+                creationTime = it.long("creationTime", System.currentTimeMillis())
+            )
+        }.filter { it.id > 0 && it.name.isNotBlank() }
+
+        return CloudSnapshot(jobs, cash, inventory, memberships, customers, alerts, team, issues, teams, roles)
     }
 
     /** Pushes the whole local database up — used right after a fresh sign up. */
@@ -396,6 +474,8 @@ object FirebaseSyncHelper {
         snapshot.serviceAlerts.forEach { saveServiceAlert(it) }
         snapshot.teamMembers.forEach { saveTeamMember(it) }
         snapshot.stockIssues.forEach { saveStockIssue(it) }
+        snapshot.teams.forEach { saveTeam(it) }
+        snapshot.roles.forEach { saveRole(it) }
         Log.d(TAG, "Pushed ${snapshot.total} local records to garage ${GarageSession.garageId}")
     }
 }

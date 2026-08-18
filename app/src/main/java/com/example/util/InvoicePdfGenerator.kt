@@ -40,6 +40,14 @@ object InvoicePdfGenerator {
 
     private const val TAG = "InvoicePdfGenerator"
 
+    /** `9.0` prints as `9`; a fractional rate keeps its decimals. */
+    private fun trimPercent(value: Double): String =
+        if (value == value.toLong().toDouble()) value.toLong().toString() else value.toString()
+
+    /** The workshop's own bill number, falling back to the internal id on older job cards. */
+    private fun invoiceRef(job: JobCardEntity): String =
+        job.invoiceNumber.ifBlank { "GG-INV-${job.id}" }
+
     /** Workshops quote a three-month interval, so the invoice carries the next due date. */
     fun nextServiceDueDate(fromMillis: Long): String {
         val cal = java.util.Calendar.getInstance().apply {
@@ -133,7 +141,7 @@ object InvoicePdfGenerator {
                 canvas.drawText("Tel: ${session.ownerPhone}", textLeft, headerY, textPaint)
                 headerY += 12f
             }
-            if (settings.gstEnabled && settings.gstin.isNotBlank()) {
+            if (settings.gstApplicable && settings.gstin.isNotBlank()) {
                 textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 canvas.drawText("GSTIN: ${settings.gstin}", textLeft, headerY, textPaint)
                 textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
@@ -153,7 +161,7 @@ object InvoicePdfGenerator {
             textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textPaint.textSize = 10f
             textPaint.color = Color.parseColor("#1E293B")
-            canvas.drawText("Invoice #: GG-INV-${job.id}", 400f, 84f, textPaint)
+            canvas.drawText("Invoice #: ${invoiceRef(job)}", 400f, 84f, textPaint)
 
             textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             textPaint.textSize = 9f
@@ -304,11 +312,27 @@ object InvoicePdfGenerator {
             canvas.drawText("₹${String.format("%.0f", job.partsCharges)}", 495f, currentY, textPaint)
             currentY += 14f
 
+            // CGST and SGST print on their own lines — a tax invoice has to show the split, not
+            // just the combined figure.
             if (job.taxes > 0) {
-                val ratePart = if (settings.gstEnabled) " (${String.format("%.0f", settings.gstRatePercent)}%)" else ""
-                canvas.drawText("Taxes / GST$ratePart:", summaryLeft, currentY, textPaint)
-                canvas.drawText("₹${String.format("%.0f", job.taxes)}", 495f, currentY, textPaint)
-                currentY += 14f
+                if (settings.gstApplicable && settings.gstRatePercent > 0) {
+                    val taxable = job.serviceCharges + job.partsCharges
+                    canvas.drawText(
+                        "CGST (${trimPercent(settings.cgstPercent)}%):", summaryLeft, currentY, textPaint
+                    )
+                    canvas.drawText("₹${String.format("%.2f", settings.cgstOn(taxable))}", 495f, currentY, textPaint)
+                    currentY += 14f
+
+                    canvas.drawText(
+                        "SGST (${trimPercent(settings.sgstPercent)}%):", summaryLeft, currentY, textPaint
+                    )
+                    canvas.drawText("₹${String.format("%.2f", settings.sgstOn(taxable))}", 495f, currentY, textPaint)
+                    currentY += 14f
+                } else {
+                    canvas.drawText("Taxes / GST:", summaryLeft, currentY, textPaint)
+                    canvas.drawText("₹${String.format("%.2f", job.taxes)}", 495f, currentY, textPaint)
+                    currentY += 14f
+                }
             }
 
             // The discount is a deduction with its own heading, not a silently reduced total.
@@ -371,7 +395,8 @@ object InvoicePdfGenerator {
             pdfDocument.finishPage(page)
 
             // Write PDF to storage
-            val fileName = "Invoice_GG_${job.id}_${job.vehiclePlate.replace(" ", "_")}.pdf"
+            val fileName = "Invoice_${invoiceRef(job).replace(Regex("[^A-Za-z0-9_-]"), "_")}_" +
+                "${job.vehiclePlate.replace(" ", "_")}.pdf"
             val documentsDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
             if (!documentsDir.exists()) {
                 documentsDir.mkdirs()
@@ -428,7 +453,7 @@ object InvoicePdfGenerator {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/pdf"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, "Invoice GG-INV-${job.id} for Vehicle ${job.vehiclePlate}")
+                putExtra(Intent.EXTRA_SUBJECT, "Invoice ${invoiceRef(job)} for Vehicle ${job.vehiclePlate}")
                 putExtra(Intent.EXTRA_TEXT, "Dear ${job.customerName},\n\nPlease find attached the Tax Invoice for your vehicle ${job.vehicleName} (${job.vehiclePlate}).\nTotal Amount: ₹${String.format("%.0f", job.totalAmount)}\n\nThank you for choosing ${com.example.data.api.GarageSession.garageName.ifBlank { "Garage Guru" }}!")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }

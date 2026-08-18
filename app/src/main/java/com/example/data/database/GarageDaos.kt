@@ -7,7 +7,9 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.RoleEntity
 import com.example.data.model.StockIssueEntity
+import com.example.data.model.TeamEntity
 import com.example.data.model.TeamMemberEntity
 import kotlinx.coroutines.flow.Flow
 
@@ -106,6 +108,26 @@ interface GarageDao {
     @Query("DELETE FROM team_members")
     suspend fun clearTeamMembers()
 
+    // --- Teams ---
+    @Query("SELECT * FROM teams ORDER BY name ASC")
+    fun getAllTeams(): Flow<List<TeamEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTeam(team: TeamEntity): Long
+
+    @Query("DELETE FROM teams")
+    suspend fun clearTeams()
+
+    // --- Roles ---
+    @Query("SELECT * FROM roles ORDER BY name ASC")
+    fun getAllRoles(): Flow<List<RoleEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRole(role: RoleEntity): Long
+
+    @Query("DELETE FROM roles")
+    suspend fun clearRoles()
+
     // --- Wipe (used when the signed-in workshop changes, so one garage never
     // --- inherits another's rows from a previous session on the same device) ---
     @Query("DELETE FROM job_cards")
@@ -126,6 +148,6 @@ interface GarageDao {
     @Query("DELETE FROM service_alerts")
     suspend fun clearServiceAlerts()
 
-    @Query("DELETE FROM sqlite_sequence WHERE name IN ('job_cards','cash_ledger','inventory','service_memberships','customer_profiles','service_alerts','stock_issues')")
+    @Query("DELETE FROM sqlite_sequence WHERE name IN ('job_cards','cash_ledger','inventory','service_memberships','customer_profiles','service_alerts','stock_issues','teams','roles')")
     suspend fun resetAutoIncrement()
 }

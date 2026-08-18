@@ -43,6 +43,16 @@ object GarageLogoStore {
     private const val PREFS = "garage_guru_logo"
     private const val KEY_STAMP = "cachedStamp"
 
+    /** Ceiling on the stored JPEG, after downscaling and compression. Shown in the upload UI. */
+    const val MAX_UPLOAD_BYTES = MAX_BYTES
+
+    /**
+     * What the picker will accept. The encoder can only produce a JPEG from a bitmap Android can
+     * decode, so anything else (a PDF, an SVG, a HEIC on an old device) is turned away with a
+     * clear reason rather than failing later with "could not read that image".
+     */
+    val SUPPORTED_MIME_TYPES = setOf("image/png", "image/jpeg", "image/jpg", "image/webp")
+
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
     private val _logo = MutableStateFlow<ByteArray?>(null)
@@ -100,8 +110,20 @@ object GarageLogoStore {
             return@withContext Result.failure(IllegalStateException("No active garage session"))
         }
         try {
+            val mime = context.contentResolver.getType(uri)?.lowercase()
+            if (mime != null && mime !in SUPPORTED_MIME_TYPES) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Unsupported image type. Use a PNG, JPG or WEBP file.")
+                )
+            }
+
             val bytes = encode(context, uri)
-                ?: return@withContext Result.failure(IllegalStateException("Could not read that image"))
+                ?: return@withContext Result.failure(
+                    IllegalStateException(
+                        "Could not read that image, or it is too large to fit under " +
+                            "${MAX_BYTES / 1024} KB. Try a smaller file."
+                    )
+                )
 
             val gid = GarageSession.garageId
             val now = System.currentTimeMillis()
@@ -133,6 +155,40 @@ object GarageLogoStore {
             Result.success(bytes.size)
         } catch (e: Exception) {
             Log.e(TAG, "Logo upload failed", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Deletes the workshop's logo everywhere: the Firestore Blob, the disk cache and the
+     * in-memory copy. The app then falls back to the default Garage Guru mark.
+     *
+     * The `logoUpdatedAt` marker is reset to 0 rather than deleted, because that is exactly what
+     * a cold start reads to decide there is no logo to fetch.
+     */
+    suspend fun remove(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (!GarageSession.isReady) {
+            return@withContext Result.failure(IllegalStateException("No active garage session"))
+        }
+        try {
+            val gid = GarageSession.garageId
+            db.collection("garages").document(gid)
+                .collection("assets").document("logo")
+                .delete()
+                .awaitResult()
+
+            db.collection("garages").document(gid)
+                .set(mapOf("logoUpdatedAt" to 0L), SetOptions.merge())
+                .awaitResult()
+
+            runCatching { cacheFile()?.delete() }
+            setCachedStamp(0L)
+            GarageSession.logoUpdatedAt = 0L
+            _logo.value = null
+            Log.d(TAG, "Removed logo for $gid")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Logo removal failed", e)
             Result.failure(e)
         }
     }

@@ -6,6 +6,8 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "job_cards")
 data class JobCardEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    /** Workshop-visible bill number, e.g. `SG1001`. Issued once, on creation, and never reused. */
+    val invoiceNumber: String = "",
     val customerName: String,
     val customerPhone: String,
     val vehicleName: String, // e.g: Maruti Swift
@@ -23,11 +25,20 @@ data class JobCardEntity(
     val totalAmount: Double = 0.0,
     // Vehicle particulars kept as their own columns rather than only inside [vehicleName], so the
     // invoice and the printed PDF can lay them out — and the owner can correct them — field by field.
+    /** Motorcycle, Scooter, Electric Scooter… the master entry the rest of the vehicle hangs off. */
+    val vehicleType: String = "",
     val vehicleMake: String = "",
     val vehicleModel: String = "",
     val vehicleVariant: String = "",
     val vehicleKm: String = "",
     val vehicleFuel: String = "",
+    /** Used when a walk-in gives no name — a serial the front desk can call them by. */
+    val customerSerial: String = "",
+    /** Who is doing the work. Defaults to whoever raised the card. */
+    val mechanicName: String = "",
+    /** Epoch millis the customer was promised the vehicle back; 0 when none was given. */
+    val expectedDelivery: Long = 0L,
+    val customerRemarks: String = "",
     val creationTime: Long = System.currentTimeMillis()
 )
 
@@ -42,15 +53,41 @@ data class CashItemEntity(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+/**
+ * A catalogue line: a service the workshop offers, or a spare/lubricant it holds.
+ *
+ * [stockType] decides which of these fields mean anything. A Service is labour — it has a charge
+ * and nothing else, so quantity, unit, purchase price and the low-stock threshold stay at zero
+ * and are never asked for. A Spare or Lube is real stock and uses all of them.
+ */
 @Entity(tableName = "inventory")
 data class InventoryItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val name: String,
     val stockType: String = "Spare", // Service, Spare, Lube
+    /** TWO_WHEELER / FOUR_WHEELER / BOTH — decides which workshops are offered this item. */
+    val vehicleCategory: String = "BOTH",
+    /** Manufacturer or brand. Not used for a Service. */
+    val companyName: String = "",
+    /** Part number / catalogue code. Not used for a Service. */
+    val partCode: String = "",
     val quantity: Int,
+    /** Piece, Litre, Box… whichever unit the quantity is counted in. */
+    val unit: String = "",
+    /** What the workshop paid per unit. Not used for a Service. */
+    val purchasePrice: Double = 0.0,
     val minStockAlert: Int,
+    /** Selling price per unit — and, for a Service, simply the service charge. */
     val unitPrice: Double
-)
+) {
+    val isService: Boolean get() = stockType.equals("Service", ignoreCase = true)
+
+    /** What the workshop makes per unit. Meaningless for a Service, which has no cost price. */
+    val profitPerUnit: Double get() = if (isService) 0.0 else unitPrice - purchasePrice
+
+    /** Services are labour: they are never counted, never run out and never block a bill. */
+    val tracksStock: Boolean get() = !isService
+}
 
 /**
  * One withdrawal from the stock room.
@@ -102,15 +139,61 @@ data class CustomerProfileEntity(
     val creationTime: Long = System.currentTimeMillis()
 )
 
+/**
+ * A group of users, e.g. "Front Desk" or "Workshop Floor".
+ *
+ * Teams carry no permissions of their own — those come from the role. A team is how an owner
+ * organises people, and deactivating one is how a whole shift is stood down without touching
+ * anybody's history.
+ */
+@Entity(tableName = "teams")
+data class TeamEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val description: String = "",
+    val isActive: Boolean = true,
+    val creationTime: Long = System.currentTimeMillis()
+)
+
+/**
+ * A named set of module permissions.
+ *
+ * [permissionsJson] is the encoded [com.example.data.permissions.PermissionSet]. It is stored as
+ * one string rather than a child table because a role is always read and written whole, and
+ * because the same string is copied onto the user's `admin` document for the security rules.
+ */
+@Entity(tableName = "roles")
+data class RoleEntity(
+    @PrimaryKey(autoGenerate = true) val id: Int = 0,
+    val name: String,
+    val description: String = "",
+    val permissionsJson: String = "",
+    /** The owner's own role cannot be edited away, or a garage could lock itself out. */
+    val isSystem: Boolean = false,
+    val creationTime: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "team_members")
 data class TeamMemberEntity(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val name: String,
-    val role: String, // Owner, Manager, Service Advisor, Technician
+    /** Role name, kept for display and for older rows; [roleId] is what actually grants access. */
+    val role: String,
+    /** The mobile number is the login id — there is no separate username. */
     val phone: String,
-    val username: String = "",
     val password: String = "",
-    val isOwner: Boolean = false
+    val isOwner: Boolean = false,
+    val teamId: Int = 0,
+    val roleId: Int = 0,
+    /**
+     * Users are never deleted, only deactivated, so job cards, invoices and ledger entries keep
+     * pointing at a real person long after they have left.
+     */
+    val isActive: Boolean = true,
+    /** Firebase Auth uid, once the user has a login of their own. */
+    val authUid: String = "",
+    val email: String = "",
+    val creationTime: Long = System.currentTimeMillis()
 )
 
 @Entity(tableName = "service_alerts")

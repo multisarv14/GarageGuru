@@ -30,6 +30,7 @@ The app is multi-tenant: one **garage** (workshop) per owner account.
 admin/{uid}                                  -> who is signed in, and which garage they own
 garages/{garageId}                           -> workshop profile
 garages/{garageId}/assets/logo               -> garage logo, stored as a Firestore Blob
+counters/clientId                            -> shared Client ID serial (not tenant-scoped)
 jobCards/{garageId}_{id}                     -> business records, all tagged with garageId
 cashItems/{garageId}_{id}
 inventoryItems/{garageId}_{id}
@@ -69,13 +70,18 @@ Document id is the Firebase Auth uid. Read on every sign in to discover `garageI
 | `id` | String | Matches the document id. |
 | `name` | String | Shown in the app's top bar. |
 | `ownerUid` / `ownerName` / `ownerEmail` / `phone` | String | |
-| `clientId` | String | Printable workshop code, `GG-XXXX-XXXX`. Derived from the uid by `GarageSettings.clientIdFor`, so a reinstall recomputes the same id rather than minting a second one. |
+| `clientId` | String | Printable workshop code, `GG` + garage initials + `-` + YY + MM + serial (e.g. `GGSG-2608101`). Issued once from the shared `counters/clientId` sequence and then never changed — a reinstall adopts the id on this document rather than minting a second one. |
+| `clientSerial` | Number | The serial drawn from the counter, kept for traceability. |
 | `appAdminEmail` | String | The app operator every registered workshop is filed against (`ceomultisarv@gmail.com`). |
 | `address` / `city` / `state` / `country` | String | `city` comes from the sign-up form; `address` is edited from the profile screen and heads every printed invoice. |
-| `gstNumber` | String | GSTIN. Printed on invoices when `gstEnabled`. |
-| `gstEnabled` | Boolean | When false no tax line is added to a bill at all. |
+| `gstNumber` | String | GSTIN. Mandatory and format-validated whenever `gstApplicable` is true; printed on every tax invoice. |
+| `gstApplicable` | Boolean | "GST Applicable — Yes/No". When false no tax line is added to a bill at all. |
+| `cgstPercent` / `sgstPercent` | Number | Stored and printed separately, as a tax invoice requires. |
 | `currency` / `currencySymbol` | String | `INR` / `₹` for new workshops. |
-| `taxRatePercent` | Number | GST rate applied to new and edited bills. |
+| `taxRatePercent` | Number | Mirror of `cgstPercent + sgstPercent`, kept for reporting. |
+| `invoicePrefix` | String | Invoice prefix code, e.g. `SG`. |
+| `invoiceStartNumber` | Number | First invoice serial, e.g. `1001`. |
+| `invoiceNextNumber` | Number | Next serial to issue. On a pull the higher of local and cloud wins, so a stale device cannot re-issue a number. |
 | `stockValidationEnabled` | Boolean | When true an item cannot be billed unless stock covers it. |
 | `showVehicleOnInvoice` | Boolean | Whether make/model/odometer/fuel are printed. |
 | `setupCompleted` | Boolean | Drives the first-run setup wizard; set once the owner finishes or skips it. |
@@ -119,10 +125,12 @@ blobs do not scale to that.
 ### `jobCards/{garageId}_{id}`
 
 `garageId`, `id`, `customerName`, `customerPhone`, `vehicleName`, `vehiclePlate`, `symptoms`,
-`diagnosis`, `status`, `tasks`, `materials`, `serviceCharges`, `partsCharges`, `taxes`,
+`invoiceNumber`, `diagnosis`, `status`, `tasks`, `materials`, `serviceCharges`, `partsCharges`, `taxes`,
 `discount`, `totalAmount`, `vehicleMake`, `vehicleModel`, `vehicleVariant`, `vehicleKm`,
 `vehicleFuel`, `creationTime`, `updatedAt`
 
+`invoiceNumber` is the workshop-visible bill number (`SG1001`), issued once at creation and
+never reused — editing or reopening a bill keeps the number the customer already holds.
 `status` moves `ESTIMATE → OPEN → COMPLETED → CLOSED`. `totalAmount` is
 `serviceCharges + partsCharges + taxes - discount`. `tasks` and `materials` are
 comma-separated strings, mirroring the Room columns. Each entry is
@@ -227,6 +235,9 @@ See `firestore.rules`. The shape:
 
 - `admin/{uid}` — any signed-in user may read; only the owner of that uid may write it.
 - `garages/{garageId}/**` — signed-in read/write.
+- `counters/{id}` — signed-in read/write. Not tenant-tagged on purpose: the Client ID serial is
+  one sequence shared by every workshop, which is what makes the ids unique. It is only touched
+  inside a read-then-increment transaction.
 - All eight business collections — signed-in read; writes must carry a non-empty `garageId`
   string, so an untagged document can never be created. Deletes are allowed for signed-in
   callers (a delete carries no `request.resource`).

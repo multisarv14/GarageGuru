@@ -6,67 +6,192 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Every tenant-owned document must carry a garageId string so the data
-    // can never be written untagged and then leak across workshops.
-    function hasGarageTag() {
-      return request.resource.data.garageId is string
-             && request.resource.data.garageId.size() > 0;
+    /**
+     * The garage this caller belongs to.
+     *
+     * Read from their own admin document, because a workshop's id is not always
+     * `garage_{uid}` — the original workshop in this project keeps its historical
+     * `garage_main`. The fallback covers the moment between an account being created and its
+     * admin document existing, so a fresh sign up is not locked out of its own first writes.
+     */
+    function callerGarageId() {
+      return exists(/databases/$(database)/documents/admin/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.garageId
+        : 'garage_' + request.auth.uid;
     }
 
-    // A delete carries no request.resource, so allow it for signed-in callers.
-    function isTaggedWrite() {
-      return request.resource == null || hasGarageTag();
+    // Reading a document requires it to belong to the caller's own workshop.
+    //
+    // This replaces a plain `isSignedIn()` check. That check meant any authenticated caller
+    // could read every workshop's job cards, customers and cash book — and with anonymous
+    // sign-in enabled, "authenticated" required nothing but the public API key that ships
+    // inside the APK. Tenancy is now enforced, not assumed.
+    function ownsExisting() {
+      return isSignedIn() && isActiveUser() && resource.data.garageId == callerGarageId();
+    }
+
+    /** A deactivated user keeps their record but loses every door. */
+    function isActiveUser() {
+      return !exists(/databases/$(database)/documents/admin/$(request.auth.uid))
+        || get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.get('active', true) == true;
+    }
+
+    /** The permission tokens ("jobCards.create") the caller's assigned role grants. */
+    function callerPermissions() {
+      return exists(/databases/$(database)/documents/admin/$(request.auth.uid))
+        ? get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.get('permissions', [])
+        : [];
+    }
+
+    function isOwnerAccount() {
+      return exists(/databases/$(database)/documents/admin/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admin/$(request.auth.uid)).data.get('role', '') == 'Owner';
+    }
+
+    /**
+     * Module permission check, enforced server side.
+     *
+     * The app hides what a role cannot use, but hiding a button is not security — a modified
+     * client can still issue the write. This is the same `module.action` token the UI reads, so
+     * what the menu shows and what the database accepts cannot drift apart.
+     */
+    function grants(token) {
+      return isOwnerAccount() || token in callerPermissions();
+    }
+
+    // Writing requires the incoming document to be tagged with the caller's own workshop, so a
+    // document can neither be created untagged nor be planted in somebody else's workshop.
+    function writesOwn() {
+      return isSignedIn() && isActiveUser() && request.resource.data.garageId == callerGarageId();
     }
 
     // Admin / owner profiles. Document id is the Firebase Auth uid.
+    // Readable only by that owner: it carries their phone number and recovery address.
     match /admin/{uid} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && request.auth.uid == uid;
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
-    // Garage workspace (tenant) profile and anything nested under it.
+    // Garage workspace (tenant) profile and anything nested under it, including the logo Blob.
     match /garages/{garageId}/{document=**} {
+      allow read, write: if isSignedIn() && garageId == callerGarageId();
+    }
+
+    // Public registration directory, read without being signed in.
+    //
+    // A sign-up must be able to say whether the mobile number or the email address is the one
+    // already taken, and somebody resetting a password must be able to confirm their number is
+    // registered — both happen before anyone is authenticated. Only SHA-256 hashes are stored, so
+    // a reader can confirm a value they already know but cannot enumerate anybody's details.
+    // An entry may be created but never altered or removed, so one workshop cannot unregister
+    // another and take over its mobile number.
+    match /registry/{phoneHash} {
+      allow read: if true;
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // Global service rate card, shared by every workshop.
+    //
+    // Readable by any signed-in user so a garage can import it; writable only through the Admin
+    // SDK (which bypasses rules), because one workshop must never be able to edit the master list
+    // every other workshop imports from.
+    match /serviceMaster/{serviceId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Global vehicle master (type / brand / model / variants) behind the job card dropdowns.
+    // Read by any signed-in workshop, written only through the Admin SDK.
+    match /vehicleMaster/{vehicleId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Shared counters — currently just the Client ID serial.
+    //
+    // Deliberately NOT tenant-scoped: the serial has to be drawn from one sequence for every
+    // workshop, which is exactly what makes a Client ID unique. It is only ever touched inside a
+    // transaction that reads the value and writes it back one higher, and it holds no data about
+    // anybody — just the next number.
+    match /counters/{counterId} {
       allow read, write: if isSignedIn();
     }
 
+    // --- Business records ---
+    //
+    // Every one of these carries a garageId, and every query the app makes filters on it, so
+    // scoping reads to the caller's own workshop costs nothing at the call sites.
+
     match /jobCards/{jobId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
+      allow read: if ownsExisting() && grants('jobCards.view');
+      allow create: if writesOwn() && grants('jobCards.create');
+      allow update: if writesOwn() && grants('jobCards.edit');
+      allow delete: if ownsExisting() && grants('jobCards.delete');
     }
 
     match /cashItems/{cashId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
+      allow read: if ownsExisting() && grants('cashbook.view');
+      allow create: if writesOwn() && grants('cashbook.create');
+      allow update: if writesOwn() && grants('cashbook.edit');
+      allow delete: if ownsExisting() && grants('cashbook.delete');
     }
 
     match /inventoryItems/{inventoryId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
-    }
-
-    match /memberships/{membershipId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
-    }
-
-    match /customers/{customerId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
-    }
-
-    match /serviceAlerts/{alertId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
-    }
-
-    match /teamMembers/{memberId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
+      allow read: if ownsExisting() && grants('inventory.view');
+      allow create: if writesOwn() && grants('inventory.create');
+      allow update: if writesOwn() && grants('inventory.edit');
+      allow delete: if ownsExisting() && grants('inventory.delete');
     }
 
     match /stockIssues/{issueId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isTaggedWrite();
+      allow read: if ownsExisting() && grants('inventory.view');
+      allow create: if writesOwn() && grants('inventory.create');
+      allow update: if writesOwn() && grants('inventory.edit');
+      allow delete: if ownsExisting() && grants('inventory.delete');
     }
+
+    match /customers/{customerId} {
+      allow read: if ownsExisting() && grants('customers.view');
+      allow create: if writesOwn() && grants('customers.create');
+      allow update: if writesOwn() && grants('customers.edit');
+      allow delete: if ownsExisting() && grants('customers.delete');
+    }
+
+    match /memberships/{membershipId} {
+      allow read: if ownsExisting() && grants('customers.view');
+      allow create: if writesOwn() && grants('customers.create');
+      allow update: if writesOwn() && grants('customers.edit');
+      allow delete: if ownsExisting() && grants('customers.delete');
+    }
+
+    match /serviceAlerts/{alertId} {
+      allow read: if ownsExisting() && grants('jobCards.view');
+      allow create: if writesOwn() && grants('jobCards.create');
+      allow update: if writesOwn() && grants('jobCards.edit');
+      allow delete: if ownsExisting() && grants('jobCards.delete');
+    }
+
+    // People and roles are administered by the owner, or a role explicitly granted Team access.
+    match /teamMembers/{memberId} {
+      allow read: if ownsExisting();
+      allow create: if writesOwn() && grants('team.create');
+      allow update: if writesOwn() && grants('team.edit');
+      allow delete: if false;
+    }
+
+    match /teams/{teamId} {
+      allow read: if ownsExisting();
+      allow create: if writesOwn() && grants('team.create');
+      allow update: if writesOwn() && grants('team.edit');
+      allow delete: if false;
+    }
+
+    match /roles/{roleId} {
+      allow read: if ownsExisting();
+      allow create: if writesOwn() && grants('team.create');
+      allow update: if writesOwn() && grants('team.edit');
+      allow delete: if false;
+    }
+
   }
 }

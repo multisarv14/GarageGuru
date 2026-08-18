@@ -20,7 +20,9 @@ import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.RoleEntity
 import com.example.data.model.StockIssueEntity
+import com.example.data.model.TeamEntity
 import com.example.data.model.TeamMemberEntity
 import com.example.data.repository.GarageRepository
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +50,8 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
     val serviceAlerts = repository.allServiceAlerts.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val teamMembers = repository.allTeamMembers.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val stockIssues = repository.allStockIssues.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val teams = repository.allTeams.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val roles = repository.allRoles.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // --- Network & Security UI Signals ---
     private val _isOffline = MutableStateFlow(false)
@@ -127,10 +131,26 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
     }
 
     // --- Job Card Actions ---
+
+    /**
+     * Saves a job card, giving it an invoice number the first time.
+     *
+     * The number is issued once and then travels with the card, so editing a bill — or reopening
+     * a closed one — never renumbers an invoice the customer already holds. Numbers already in
+     * use are passed to the allocator so a cloud restore cannot produce a duplicate.
+     */
     fun addJobCard(job: JobCardEntity) {
         viewModelScope.launch {
-            val assignedId = repository.insertJobCard(job)
-            val finalJob = if (job.id == 0) job.copy(id = assignedId.toInt()) else job
+            val numbered = if (job.invoiceNumber.isBlank()) {
+                job.copy(
+                    invoiceNumber = com.example.data.api.GarageSettings.allocateInvoiceNumber(
+                        jobCards.value.map { it.invoiceNumber }.filter { it.isNotBlank() }
+                    )
+                )
+            } else job
+
+            val assignedId = repository.insertJobCard(numbered)
+            val finalJob = if (numbered.id == 0) numbered.copy(id = assignedId.toInt()) else numbered
             com.example.data.api.FirebaseSyncHelper.saveJobCard(finalJob)
         }
     }
@@ -196,6 +216,43 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
             val updated = fresh.copy(quantity = (fresh.quantity + delta).coerceAtLeast(0))
             repository.insertInventoryItem(updated)
             com.example.data.api.FirebaseSyncHelper.saveInventoryItem(updated)
+        }
+    }
+
+    /**
+     * Copies the default service rate card into this workshop's own Service Master.
+     *
+     * Only services it does not already have are added, matched on name, so importing twice does
+     * nothing the second time and a rate the owner has already edited is never overwritten.
+     * Reports how many were actually added.
+     */
+    fun importDefaultServices(onDone: (added: Int, skipped: Int) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            // Prefers what the operator published to Firestore; the bundled list only stands in
+            // when the cloud copy has not been fetched.
+            val defaults = com.example.data.api.ServiceMasterStore
+                .defaultsFor(com.example.data.api.GarageSettings.current.servicingType)
+            val existing = inventoryItems.value
+                .filter { it.isService }
+                .map { it.name.trim().lowercase() }
+                .toSet()
+
+            var added = 0
+            defaults.forEach { entry ->
+                if (entry.title.trim().lowercase() in existing) return@forEach
+                val item = InventoryItemEntity(
+                    name = entry.title,
+                    stockType = "Service",
+                    vehicleCategory = entry.category.stored,
+                    quantity = 0,
+                    minStockAlert = 0,
+                    unitPrice = entry.price
+                )
+                val id = repository.insertInventoryItem(item)
+                com.example.data.api.FirebaseSyncHelper.saveInventoryItem(item.copy(id = id.toInt()))
+                added++
+            }
+            onDone(added, defaults.size - added)
         }
     }
 
@@ -340,10 +397,72 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
         }
     }
 
-    fun deleteTeamMember(id: Int) {
+    /**
+     * Turns a user's access on or off.
+     *
+     * There is deliberately no delete: job cards, invoices and ledger entries name the person who
+     * raised them, and removing the row would orphan that history. An inactive user keeps their
+     * record and loses their login.
+     */
+    fun setTeamMemberActive(member: TeamMemberEntity, active: Boolean) {
+        addTeamMember(member.copy(isActive = active))
+    }
+
+    fun assignTeamMemberTeam(member: TeamMemberEntity, teamId: Int) {
+        addTeamMember(member.copy(teamId = teamId))
+    }
+
+    fun assignTeamMemberRole(member: TeamMemberEntity, role: RoleEntity) {
+        addTeamMember(member.copy(roleId = role.id, role = role.name))
+    }
+
+    // --- Teams ---
+    fun saveTeam(team: TeamEntity) {
         viewModelScope.launch {
-            repository.deleteTeamMemberById(id)
-            com.example.data.api.FirebaseSyncHelper.deleteTeamMember(id)
+            val assignedId = repository.insertTeam(team)
+            val saved = if (team.id == 0) team.copy(id = assignedId.toInt()) else team
+            com.example.data.api.FirebaseSyncHelper.saveTeam(saved)
+        }
+    }
+
+    fun setTeamActive(team: TeamEntity, active: Boolean) = saveTeam(team.copy(isActive = active))
+
+    // --- Roles ---
+    fun saveRole(role: RoleEntity) {
+        viewModelScope.launch {
+            val assignedId = repository.insertRole(role)
+            val saved = if (role.id == 0) role.copy(id = assignedId.toInt()) else role
+            com.example.data.api.FirebaseSyncHelper.saveRole(saved)
+
+            // Everyone holding this role gets the new permissions immediately, including the copy
+            // written onto their admin document that the security rules read.
+            teamMembers.value.filter { it.roleId == saved.id }.forEach { member ->
+                repository.insertTeamMember(member.copy(role = saved.name))
+                com.example.data.api.FirebaseSyncHelper.saveTeamMember(member.copy(role = saved.name))
+                com.example.data.api.FirebaseAuthHelper.syncUserPermissions(member, saved)
+            }
+        }
+    }
+
+    /**
+     * Makes sure a workshop always has the roles it cannot function without.
+     *
+     * Called after each cloud sync. The Owner role is marked system so it can never be edited
+     * into something that locks the owner out of their own garage.
+     */
+    fun ensureDefaultRoles() {
+        viewModelScope.launch {
+            val existing = repository.allRoles.first()
+            if (existing.any { it.isSystem }) return@launch
+
+            val owner = RoleEntity(
+                name = "Owner",
+                description = "Full access to every module. Cannot be edited.",
+                permissionsJson = com.example.data.permissions.PermissionSet.all().toJson(),
+                isSystem = true
+            )
+            val id = repository.insertRole(owner)
+            com.example.data.api.FirebaseSyncHelper.saveRole(owner.copy(id = id.toInt()))
         }
     }
 
@@ -414,6 +533,9 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                     onDone(0, local.total)
                 }
                 reconcileOwnerTeamMember(session.ownerName, session.ownerPhone)
+                ensureDefaultRoles()
+                com.example.data.api.ServiceMasterStore.refresh()
+                com.example.data.api.VehicleMasterStore.refresh()
             } catch (e: Exception) {
                 Log.e(TAG, "Cloud sync failed", e)
                 _lastSyncMessage.value = "Sync failed: ${e.message}"
@@ -493,6 +615,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
             jobCards.value.forEach {
                 val obj = JSONObject()
                     .put("id", it.id)
+                    .put("invoiceNumber", it.invoiceNumber)
                     .put("customerName", it.customerName)
                     .put("customerPhone", it.customerPhone)
                     .put("vehicleName", it.vehicleName)
@@ -507,11 +630,16 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                     .put("taxes", it.taxes)
                     .put("discount", it.discount)
                     .put("totalAmount", it.totalAmount)
+                    .put("vehicleType", it.vehicleType)
                     .put("vehicleMake", it.vehicleMake)
                     .put("vehicleModel", it.vehicleModel)
                     .put("vehicleVariant", it.vehicleVariant)
                     .put("vehicleKm", it.vehicleKm)
                     .put("vehicleFuel", it.vehicleFuel)
+                    .put("customerSerial", it.customerSerial)
+                    .put("mechanicName", it.mechanicName)
+                    .put("expectedDelivery", it.expectedDelivery)
+                    .put("customerRemarks", it.customerRemarks)
                     .put("creationTime", it.creationTime)
                 jobsArray.put(obj)
             }
@@ -539,7 +667,12 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                     .put("id", it.id)
                     .put("name", it.name)
                     .put("stockType", it.stockType)
+                    .put("vehicleCategory", it.vehicleCategory)
+                    .put("companyName", it.companyName)
+                    .put("partCode", it.partCode)
                     .put("quantity", it.quantity)
+                    .put("unit", it.unit)
+                    .put("purchasePrice", it.purchasePrice)
                     .put("minStockAlert", it.minStockAlert)
                     .put("unitPrice", it.unitPrice)
                 invArray.put(obj)
@@ -583,6 +716,7 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                         val obj = arr.getJSONObject(i)
                         repository.insertJobCard(
                             JobCardEntity(
+                                invoiceNumber = obj.optString("invoiceNumber", ""),
                                 customerName = obj.optString("customerName", ""),
                                 customerPhone = obj.optString("customerPhone", ""),
                                 vehicleName = obj.optString("vehicleName", ""),
@@ -597,11 +731,16 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                                 taxes = obj.optDouble("taxes", 0.0),
                                 discount = obj.optDouble("discount", 0.0),
                                 totalAmount = obj.optDouble("totalAmount", 0.0),
+                                vehicleType = obj.optString("vehicleType", ""),
                                 vehicleMake = obj.optString("vehicleMake", ""),
                                 vehicleModel = obj.optString("vehicleModel", ""),
                                 vehicleVariant = obj.optString("vehicleVariant", ""),
                                 vehicleKm = obj.optString("vehicleKm", ""),
                                 vehicleFuel = obj.optString("vehicleFuel", ""),
+                                customerSerial = obj.optString("customerSerial", ""),
+                                mechanicName = obj.optString("mechanicName", ""),
+                                expectedDelivery = obj.optLong("expectedDelivery", 0L),
+                                customerRemarks = obj.optString("customerRemarks", ""),
                                 creationTime = obj.optLong("creationTime", System.currentTimeMillis())
                             )
                         )
@@ -635,7 +774,12 @@ class GarageViewModel(private val repository: GarageRepository) : ViewModel() {
                             InventoryItemEntity(
                                 name = obj.optString("name", ""),
                                 stockType = obj.optString("stockType", "Spare"),
+                                vehicleCategory = obj.optString("vehicleCategory", "BOTH"),
+                                companyName = obj.optString("companyName", ""),
+                                partCode = obj.optString("partCode", ""),
                                 quantity = obj.optInt("quantity", 0),
+                                unit = obj.optString("unit", ""),
+                                purchasePrice = obj.optDouble("purchasePrice", 0.0),
                                 minStockAlert = obj.optInt("minStockAlert", 5),
                                 unitPrice = obj.optDouble("unitPrice", 0.0)
                             )

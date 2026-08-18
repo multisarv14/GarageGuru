@@ -8,10 +8,12 @@ import com.example.data.model.CashItemEntity
 import com.example.data.model.CustomerProfileEntity
 import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
+import com.example.data.model.RoleEntity
 import com.example.data.model.ServiceAlertEntity
-import com.example.data.model.StockIssueEntity
-import com.example.data.model.TeamMemberEntity
 import com.example.data.model.ServiceMembershipEntity
+import com.example.data.model.StockIssueEntity
+import com.example.data.model.TeamEntity
+import com.example.data.model.TeamMemberEntity
 
 @Database(
     entities = [
@@ -22,9 +24,11 @@ import com.example.data.model.ServiceMembershipEntity
         CustomerProfileEntity::class,
         ServiceAlertEntity::class,
         TeamMemberEntity::class,
-        StockIssueEntity::class
+        StockIssueEntity::class,
+        TeamEntity::class,
+        RoleEntity::class
     ],
-    version = 5,
+    version = 9,
     exportSchema = false
 )
 abstract class GarageDatabase : RoomDatabase() {

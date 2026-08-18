@@ -30,8 +30,9 @@ class InvoiceItemParsingTest {
     fun resetSettings() {
         // No Android context in a plain unit test, so this only touches the in-memory state.
         GarageSettings.update(
-            gstEnabled = true,
-            gstRatePercent = 18.0,
+            gstApplicable = true,
+            cgstPercent = 9.0,
+            sgstPercent = 9.0,
             syncToCloud = false
         )
     }
@@ -58,10 +59,11 @@ class InvoiceItemParsingTest {
 
     @Test
     fun `a bare service name still falls back to the catalogue`() {
+        // 150 is the rate card price; the old hand-written 300 no longer applies.
         val rows = parseInvoiceItems("Engine Oil Change", "")
 
         assertEquals("Engine Oil Change", rows[0].description)
-        assertEquals(300.0, rows[0].price, 0.001)
+        assertEquals(150.0, rows[0].price, 0.001)
     }
 
     @Test
@@ -116,12 +118,38 @@ class InvoiceItemParsingTest {
 
     @Test
     fun `no tax line is added when GST is switched off`() {
-        GarageSettings.update(gstEnabled = false, syncToCloud = false)
+        GarageSettings.update(gstApplicable = false, syncToCloud = false)
 
         val job = recalculatedJob(emptyJob, tasks = formatInvoiceItem("Chain Cleaning", 1, 200.0))
 
         assertEquals(0.0, job.taxes, 0.001)
         assertEquals(200.0, job.totalAmount, 0.001)
+    }
+
+    @Test
+    fun `a workshop's own service keeps its price onto the invoice`() {
+        // A service defined in the workshop's Service Master is unknown to the built-in
+        // catalogue. Written with its price it survives; written bare it would have fallen back
+        // to the 100.0 default and under-billed the job.
+        val stored = formatInvoiceItem("Full Body Wash & Polish", 1, 800.0)
+        val rows = parseInvoiceItems(stored, "")
+
+        assertEquals("Full Body Wash & Polish", rows[0].description)
+        assertEquals(800.0, rows[0].price, 0.001)
+    }
+
+    @Test
+    fun `several chosen services each keep their own price`() {
+        val stored = listOf(
+            formatInvoiceItem("Full Body Wash & Polish", 1, 800.0),
+            formatInvoiceItem("Engine Oil Change", 1, 450.0)
+        ).joinToString(",")
+
+        val rows = parseInvoiceItems(stored, "")
+
+        assertEquals(2, rows.size)
+        assertEquals(800.0, rows[0].price, 0.001)
+        assertEquals(450.0, rows[1].price, 0.001)   // not the catalogue's 300
     }
 
     @Test

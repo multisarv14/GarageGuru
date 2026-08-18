@@ -7,7 +7,9 @@ import com.example.data.model.CustomerProfileEntity
 import com.example.data.model.InventoryItemEntity
 import com.example.data.model.JobCardEntity
 import com.example.data.model.ServiceAlertEntity
+import com.example.data.model.RoleEntity
 import com.example.data.model.StockIssueEntity
+import com.example.data.model.TeamEntity
 import com.example.data.model.TeamMemberEntity
 import com.example.data.model.ServiceMembershipEntity
 import kotlinx.coroutines.flow.Flow
@@ -24,6 +26,8 @@ class GarageRepository(private val dao: GarageDao) {
     val allServiceAlerts: Flow<List<ServiceAlertEntity>> = dao.getAllServiceAlerts()
     val allTeamMembers: Flow<List<TeamMemberEntity>> = dao.getAllTeamMembers()
     val allStockIssues: Flow<List<StockIssueEntity>> = dao.getAllStockIssues()
+    val allTeams: Flow<List<TeamEntity>> = dao.getAllTeams()
+    val allRoles: Flow<List<RoleEntity>> = dao.getAllRoles()
 
     // --- Suspend Functions ---
     suspend fun getJobCardById(id: Int): JobCardEntity? = dao.getJobCardById(id)
@@ -49,6 +53,9 @@ class GarageRepository(private val dao: GarageDao) {
     suspend fun insertTeamMember(member: TeamMemberEntity): Long = dao.insertTeamMember(member)
     suspend fun deleteTeamMemberById(id: Int) = dao.deleteTeamMemberById(id)
 
+    suspend fun insertTeam(team: TeamEntity): Long = dao.insertTeam(team)
+    suspend fun insertRole(role: RoleEntity): Long = dao.insertRole(role)
+
     suspend fun insertStockIssue(issue: StockIssueEntity): Long = dao.insertStockIssue(issue)
     suspend fun deleteStockIssueById(id: Int) = dao.deleteStockIssueById(id)
 
@@ -64,6 +71,8 @@ class GarageRepository(private val dao: GarageDao) {
         snapshot.serviceAlerts.forEach { dao.insertServiceAlert(it) }
         snapshot.teamMembers.forEach { dao.insertTeamMember(it) }
         snapshot.stockIssues.forEach { dao.insertStockIssue(it) }
+        snapshot.teams.forEach { dao.insertTeam(it) }
+        snapshot.roles.forEach { dao.insertRole(it) }
     }
 
     /** The whole local database, shaped for an upload. */
@@ -75,7 +84,9 @@ class GarageRepository(private val dao: GarageDao) {
         customers = allCustomerProfiles.first(),
         serviceAlerts = allServiceAlerts.first(),
         teamMembers = allTeamMembers.first(),
-        stockIssues = allStockIssues.first()
+        stockIssues = allStockIssues.first(),
+        teams = allTeams.first(),
+        roles = allRoles.first()
     )
 
     /**
@@ -91,6 +102,8 @@ class GarageRepository(private val dao: GarageDao) {
         dao.clearServiceAlerts()
         dao.clearTeamMembers()
         dao.clearStockIssues()
+        dao.clearTeams()
+        dao.clearRoles()
         dao.resetAutoIncrement()
     }
 }

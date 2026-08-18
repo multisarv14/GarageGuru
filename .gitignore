@@ -36,3 +36,12 @@ signing.properties
 
 # Generated icon previews / scratch
 *.tmp
+
+# Cloud Functions dependencies — restored by `npm install` in functions/
+functions/node_modules/
+functions/.env
+npm-debug.log
+
+# Source spreadsheets — the data lives in code (TwoWheelerServiceMaster.kt), not the file
+*.xlsx
+*.xls

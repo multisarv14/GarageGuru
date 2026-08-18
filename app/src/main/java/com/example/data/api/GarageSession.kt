@@ -20,6 +20,7 @@ object GarageSession {
     private const val KEY_OWNER_NAME = "ownerName"
     private const val KEY_OWNER_PHONE = "ownerPhone"
     private const val KEY_OWNER_EMAIL = "ownerEmail"
+    private const val KEY_CONTACT_EMAIL = "contactEmail"
 
     private var prefs: SharedPreferences? = null
 
@@ -33,11 +34,51 @@ object GarageSession {
         private set
     @Volatile var ownerPhone: String = ""
         private set
+    /** Synthetic login identity (`user_<digits>@garageguru.local`) — never shown to the user. */
     @Volatile var ownerEmail: String = ""
+        private set
+
+    /** The real address the owner gave at registration. This is what the profile screen shows. */
+    @Volatile var ownerContactEmail: String = ""
         private set
 
     /** `logoUpdatedAt` marker from the garage profile; 0 means this garage has no logo. */
     @Volatile var logoUpdatedAt: Long = 0L
+
+    /**
+     * Who is signed in and what they may do.
+     *
+     * A workshop no longer has one login: the owner has theirs, and every team member the admin
+     * creates has their own. What each may see comes from their assigned role, so this is read by
+     * the navigation bar, the tab router and every screen that offers a destructive action.
+     */
+    data class SignedInUser(
+        val name: String = "Owner",
+        val roleName: String = "Owner",
+        val isOwner: Boolean = true,
+        val isActive: Boolean = true,
+        val permissions: com.example.data.permissions.PermissionSet =
+            com.example.data.permissions.PermissionSet.all()
+    ) {
+        /** The owner is never locked out of their own garage, whatever a role says. */
+        fun can(
+            module: com.example.data.permissions.AppModule,
+            action: com.example.data.permissions.PermissionAction
+        ): Boolean = isOwner || permissions.can(module, action)
+
+        fun canView(module: com.example.data.permissions.AppModule): Boolean =
+            isOwner || permissions.canView(module)
+    }
+
+    private val _signedInUser = kotlinx.coroutines.flow.MutableStateFlow(SignedInUser())
+    val signedInUser: kotlinx.coroutines.flow.StateFlow<SignedInUser> = _signedInUser
+
+    /** Snapshot for non-composable callers. */
+    val currentUser: SignedInUser get() = _signedInUser.value
+
+    fun updateSignedInUser(user: SignedInUser) {
+        _signedInUser.value = user
+    }
 
     val isReady: Boolean get() = uid.isNotBlank() && garageId.isNotBlank()
 
@@ -51,6 +92,7 @@ object GarageSession {
         ownerName = p.getString(KEY_OWNER_NAME, "Owner").orEmpty()
         ownerPhone = p.getString(KEY_OWNER_PHONE, "").orEmpty()
         ownerEmail = p.getString(KEY_OWNER_EMAIL, "").orEmpty()
+        ownerContactEmail = p.getString(KEY_CONTACT_EMAIL, "").orEmpty()
     }
 
     fun update(
@@ -59,7 +101,8 @@ object GarageSession {
         garageName: String = this.garageName,
         ownerName: String = this.ownerName,
         ownerPhone: String = this.ownerPhone,
-        ownerEmail: String = this.ownerEmail
+        ownerEmail: String = this.ownerEmail,
+        ownerContactEmail: String = this.ownerContactEmail
     ) {
         this.uid = uid
         this.garageId = garageId
@@ -67,6 +110,7 @@ object GarageSession {
         this.ownerName = ownerName
         this.ownerPhone = ownerPhone
         this.ownerEmail = ownerEmail
+        this.ownerContactEmail = ownerContactEmail
         prefs?.edit()
             ?.putString(KEY_UID, uid)
             ?.putString(KEY_GARAGE_ID, garageId)
@@ -74,6 +118,7 @@ object GarageSession {
             ?.putString(KEY_OWNER_NAME, ownerName)
             ?.putString(KEY_OWNER_PHONE, ownerPhone)
             ?.putString(KEY_OWNER_EMAIL, ownerEmail)
+            ?.putString(KEY_CONTACT_EMAIL, ownerContactEmail)
             ?.apply()
     }
 
@@ -81,10 +126,12 @@ object GarageSession {
         uid = ""
         garageId = ""
         logoUpdatedAt = 0L
+        _signedInUser.value = SignedInUser()
         garageName = "Garage Guru"
         ownerName = "Owner"
         ownerPhone = ""
         ownerEmail = ""
+        ownerContactEmail = ""
         prefs?.edit()?.clear()?.apply()
     }
 
